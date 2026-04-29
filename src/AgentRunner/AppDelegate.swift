@@ -62,6 +62,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // 앱 시작 시 1회 백그라운드 체크
         Task { await self.runUpdateCheck() }
+
+        // 첫 실행 시 Launch at Login 활성화 의향 확인
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.promptLaunchAtLoginIfFirstTime()
+        }
+    }
+
+    /// 첫 실행에서만 Launch at Login 활성화 여부를 묻는 다이얼로그.
+    /// 사용자가 한 번 답하면 다시 묻지 않음 — UserDefaults 키로 추적.
+    private func promptLaunchAtLoginIfFirstTime() {
+        let key = "hasPromptedLaunchAtLogin"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+
+        // 이미 사용자가 켜놨으면 묻지 않음 (예: brew 재설치)
+        if LoginItem.isEnabled { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Launch AgentRunner at login?"
+        alert.informativeText = """
+        AgentRunner lives in your menu bar — it's most useful when always running.
+        You can change this anytime from the right-click menu.
+        """
+        alert.addButton(withTitle: "Enable")
+        alert.addButton(withTitle: "Not now")
+        alert.alertStyle = .informational
+
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            LoginItem.setEnabled(true)
+            launchAtLoginItem?.state = LoginItem.isEnabled ? .on : .off
+            NSLog("AgentRunner: Launch at Login enabled via first-run prompt")
+        }
     }
 
     deinit {
