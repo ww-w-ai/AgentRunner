@@ -126,44 +126,35 @@ Check the provider's official API docs for the base URL, or run `nettop -P -m tc
 
 > Requires macOS 13 (Ventura) or later. Apple Silicon and Intel both supported.
 
-### Homebrew (recommended)
+1. Download the latest `AgentRunner-x.y.dmg` from [Releases](https://github.com/ww-w-ai/AgentRunner/releases).
+2. Open the DMG → drag `AgentRunner.app` into `/Applications`.
+3. **First launch — bypass Gatekeeper** (one time only). The app isn't yet notarized with a paid Apple Developer ID, so macOS blocks the first launch:
+   - **macOS 13–14 (Ventura/Sonoma):** Right-click `AgentRunner.app` → **Open** → confirm.
+   - **macOS 15+ (Sequoia):** Double-click → you'll see a "blocked" dialog → click **Done**. Then go to **System Settings → Privacy & Security**, scroll to the bottom, and click **Open Anyway** next to the AgentRunner entry → confirm with password.
+   - **Terminal one-liner (any version):**
+     ```bash
+     xattr -dr com.apple.quarantine /Applications/AgentRunner.app
+     ```
+4. Look for the pixel character in your menu bar (top-right). Right-click for settings, left-click for active sessions.
+
+Subsequent launches just work.
+
+### Alternative: Homebrew
+
+For CLI-friendly users who prefer `brew upgrade` over manual download:
 
 ```bash
 brew tap ww-w-ai/tap
 brew install --cask agentrunner
 ```
 
-The app auto-launches after install — look for the pixel character in your menu bar (top-right of the screen). It has no Dock icon by design.
-
-**First launch on macOS 15 (Sequoia) and later** — you'll see a Gatekeeper dialog ("Apple could not verify…"). This is a one-time hurdle because the app isn't (yet) notarized with a paid Apple Developer ID:
-
-1. Click **Done** on the dialog.
-2. Open **System Settings → Privacy & Security**.
-3. Scroll to the bottom — you'll see "AgentRunner.app was blocked". Click **Open Anyway**.
-4. Confirm again with your password and click **Open**.
-
-Subsequent launches just work. (Brew already strips the quarantine attribute, but Sequoia adds an additional notarization check that only Apple-notarized apps can bypass.)
+Brew strips the quarantine attribute, but Sequoia's notarization check still triggers, so the **Privacy & Security → Open Anyway** step above is still required on first launch.
 
 To upgrade later:
 ```bash
 brew update
 brew upgrade --cask agentrunner
 ```
-
-### Manual DMG
-
-1. Download `AgentRunner-x.y.dmg` from [Releases](https://github.com/ww-w-ai/AgentRunner/releases).
-2. Open the DMG → drag `AgentRunner.app` into `/Applications`.
-3. **First launch — bypass Gatekeeper.** macOS blocks unsigned apps from the internet. You'll need to do one of these (just once):
-   - **macOS 13–14 (Ventura/Sonoma):** Right-click `AgentRunner.app` → **Open** → confirm in the dialog.
-   - **macOS 15+ (Sequoia):** Double-click as usual; you'll see a "blocked" dialog. Then go to **System Settings → Privacy & Security**, scroll to the bottom, and click **Open Anyway** next to the AgentRunner entry. Confirm again when prompted.
-   - **Terminal one-liner (any version):**
-     ```bash
-     xattr -dr com.apple.quarantine /Applications/AgentRunner.app
-     ```
-4. Launch. Right-click the menu bar character for settings.
-
-> The Homebrew install path above avoids all of this — `brew` removes the quarantine attribute automatically.
 
 ---
 
