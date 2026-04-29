@@ -68,16 +68,6 @@ d.polygon(
     fill=ACCENT,
 )
 
-# Step labels under each icon
-f_step = font(11)
-step1 = "1. Drag to Applications"
-s1w = d.textbbox((0, 0), step1, font=f_step)[2]
-d.text((150 - s1w / 2, 280), step1, fill=ACCENT, font=f_step)
-
-step2 = "2. Drop here"
-s2w = d.textbbox((0, 0), step2, font=f_step)[2]
-d.text((450 - s2w / 2, 280), step2, fill=ACCENT, font=f_step)
-
 # Footer — how to launch (the trickiest step for menu bar apps)
 f_launch = font(13)
 launch_title = "After install — open with Spotlight:"

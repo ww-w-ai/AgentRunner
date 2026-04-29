@@ -8,6 +8,7 @@
 //
 
 import Foundation
+import Network
 
 struct Provider: Codable, Identifiable {
     let name: String
@@ -152,10 +153,15 @@ final class ProviderRegistry {
     private let lock = NSLock()
     private var refreshTimer: DispatchSourceTimer?
     private var changeObserver: NSObjectProtocol?
+    private var pathMonitor: NWPathMonitor?
+    private let pathMonitorQueue = DispatchQueue(label: "AgentRunner.pathMonitor")
+    private var pathRefreshWorkItem: DispatchWorkItem?
+    private var hasReceivedInitialPath = false
 
     func start() {
         refreshNow()
         scheduleRefresh()
+        startPathMonitor()
         changeObserver = NotificationCenter.default.addObserver(
             forName: .providersChanged, object: nil, queue: nil
         ) { [weak self] _ in self?.refreshNow() }
@@ -164,10 +170,43 @@ final class ProviderRegistry {
     func stop() {
         refreshTimer?.cancel()
         refreshTimer = nil
+        pathMonitor?.cancel()
+        pathMonitor = nil
+        pathRefreshWorkItem?.cancel()
+        pathRefreshWorkItem = nil
+        hasReceivedInitialPath = false
         if let observer = changeObserver {
             NotificationCenter.default.removeObserver(observer)
             changeObserver = nil
         }
+    }
+
+    /// External trigger (e.g. system wake) — re-resolve immediately.
+    func refresh() {
+        refreshNow()
+    }
+
+    private func startPathMonitor() {
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] _ in
+            guard let self = self else { return }
+            // Skip the initial delivery; start() already kicked off refreshNow().
+            guard self.hasReceivedInitialPath else {
+                self.hasReceivedInitialPath = true
+                return
+            }
+            // Coalesce rapid flips (e.g. VPN bring-up) into a single refresh.
+            self.pathRefreshWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                NSLog("AgentRunner: network path changed, refreshing IPs")
+                self?.refreshNow()
+            }
+            self.pathRefreshWorkItem = work
+            DispatchQueue.global(qos: .background)
+                .asyncAfter(deadline: .now() + 1.0, execute: work)
+        }
+        monitor.start(queue: pathMonitorQueue)
+        pathMonitor = monitor
     }
 
     func providerName(forIP ip: String) -> String? {

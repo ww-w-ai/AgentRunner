@@ -422,6 +422,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func receiveWake(_ notification: Notification) {
         NSLog("AgentRunner: system wake, resuming")
+        registry.refresh()
         sessions.start()
         nettop.start()
         animator.renderInitial()
