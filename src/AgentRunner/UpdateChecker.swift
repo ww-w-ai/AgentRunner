@@ -85,4 +85,30 @@ enum UpdateChecker {
 
     // 자동 체크 인프라는 의도적으로 없음 — Preferences 창 열 때 1회만 체크.
     // 사용자에게 알림을 강요하지 않고, 본인이 설정 보러 들어왔을 때만 노출.
+
+    /// 설치 경로 감지 — 업데이트 가이드 분기에 사용.
+    enum InstallSource {
+        case homebrew    // /Applications symlink → /opt/homebrew/Caskroom/...
+        case manual      // /Applications/AgentRunner.app 자체가 디렉토리
+    }
+
+    static var installSource: InstallSource {
+        let bundlePath = Bundle.main.bundlePath
+        // 1) Bundle path가 Caskroom 안에 직접 있는 경우 (드물게 사용자가 Caskroom의 .app 직접 실행)
+        if bundlePath.contains("/Caskroom/") || bundlePath.contains("/opt/homebrew/") {
+            return .homebrew
+        }
+        // 2) /Applications/AgentRunner.app이 심볼릭 링크인지 확인 (brew의 표준 패턴)
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: bundlePath),
+           let type = attrs[.type] as? FileAttributeType,
+           type == .typeSymbolicLink {
+            return .homebrew
+        }
+        // 3) 심볼릭 링크 아니지만 resolvingSymlinks로 확인 (다른 brew prefix 등)
+        let resolved = (bundlePath as NSString).resolvingSymlinksInPath
+        if resolved.contains("/Caskroom/") || resolved.contains("/opt/homebrew/") {
+            return .homebrew
+        }
+        return .manual
+    }
 }

@@ -245,13 +245,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Menu actions
 
     @objc private func checkForUpdates(_ sender: Any?) {
-        if case .available(_, let url) = updateState {
-            NSWorkspace.shared.open(url)
+        if case .available(let version, let url) = updateState {
+            // 설치 경로별로 다른 업데이트 가이드 제공
+            switch UpdateChecker.installSource {
+            case .homebrew:
+                showHomebrewUpgradeGuide(version: version)
+            case .manual:
+                NSWorkspace.shared.open(url)   // GitHub Release / DMG 다운로드 URL
+            }
             return
         }
         // 강제 재체크
         lastUpdateCheck = .distantPast
         Task { await self.runUpdateCheck() }
+    }
+
+    /// brew로 설치된 사용자에게 업그레이드 명령 안내 + 클립보드 복사.
+    private func showHomebrewUpgradeGuide(version: String) {
+        let cmd = "brew update && brew upgrade --cask agentrunner"
+
+        let alert = NSAlert()
+        alert.messageText = "Update available — v\(version)"
+        alert.informativeText = """
+        You installed AgentRunner via Homebrew. Run this in Terminal:
+
+        \(cmd)
+        """
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Copy command")
+        alert.addButton(withTitle: "Open in Terminal")
+        alert.addButton(withTitle: "Cancel")
+
+        NSApp.activate(ignoringOtherApps: true)
+        let resp = alert.runModal()
+        switch resp {
+        case .alertFirstButtonReturn:
+            // 클립보드에 복사
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString(cmd, forType: .string)
+        case .alertSecondButtonReturn:
+            // Terminal.app으로 명령 실행 (AppleScript)
+            let script = """
+            tell application "Terminal"
+                activate
+                do script "\(cmd)"
+            end tell
+            """
+            if let scriptObj = NSAppleScript(source: script) {
+                var err: NSDictionary?
+                scriptObj.executeAndReturnError(&err)
+                if let err = err {
+                    NSLog("AgentRunner: Terminal AppleScript error — \(err)")
+                }
+            }
+        default:
+            break
+        }
     }
 
     @objc private func toggleLaunchAtLogin(_ sender: Any?) {
