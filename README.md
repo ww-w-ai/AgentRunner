@@ -146,6 +146,7 @@ Subsequent launches just work. (Brew already strips the quarantine attribute, bu
 
 To upgrade later:
 ```bash
+brew update
 brew upgrade --cask agentrunner
 ```
 
