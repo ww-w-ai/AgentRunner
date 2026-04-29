@@ -58,70 +58,49 @@ echo "  Signed with: ${SIGN_IDENTITY}"
 # Verify signature
 codesign --verify --verbose "${DIST_DIR}/${APP_NAME}.app" 2>&1 | sed 's/^/  /'
 
-# DMG 옵션 — 배경 이미지 + 아이콘 위치 고정으로 "여기로 드래그" UX 명확히
+# DMG 옵션 — create-dmg로 배경 + 아이콘 위치 고정 (AppleScript 안정성 위임)
 if [[ "${1:-}" == "--dmg" ]]; then
     echo "▸ Creating DMG with custom layout..."
     DMG_NAME="${APP_NAME}-${VERSION}.dmg"
-    DMG_TMP="${DIST_DIR}/dmg_tmp"
-    DMG_RW="${DIST_DIR}/${APP_NAME}-rw.dmg"
     BG_SRC="docs/dmg_bg.png"
 
-    rm -rf "${DMG_TMP}" "${DMG_RW}"
-    mkdir -p "${DMG_TMP}"
-    cp -R "${DIST_DIR}/${APP_NAME}.app" "${DMG_TMP}/"
-    ln -sf /Applications "${DMG_TMP}/Applications"
+    rm -f "${DIST_DIR}/${DMG_NAME}"
 
-    # 배경 이미지를 .background 폴더에 (Finder 컨벤션)
-    if [[ -f "${BG_SRC}" ]]; then
-        mkdir -p "${DMG_TMP}/.background"
-        cp "${BG_SRC}" "${DMG_TMP}/.background/bg.png"
+    if ! command -v create-dmg >/dev/null 2>&1; then
+        echo "  ⚠️  create-dmg not installed. Install with: brew install create-dmg"
+        echo "  Falling back to plain DMG (no custom layout)..."
+        DMG_TMP="${DIST_DIR}/dmg_tmp"
+        rm -rf "${DMG_TMP}"
+        mkdir -p "${DMG_TMP}"
+        cp -R "${DIST_DIR}/${APP_NAME}.app" "${DMG_TMP}/"
+        ln -sf /Applications "${DMG_TMP}/Applications"
+        hdiutil create -volname "${APP_NAME}" -srcfolder "${DMG_TMP}" \
+            -ov -format UDZO "${DIST_DIR}/${DMG_NAME}" >/dev/null
+        rm -rf "${DMG_TMP}"
+    else
+        # create-dmg 옵션:
+        #   --volname           : 마운트 시 표시될 볼륨명
+        #   --background        : 배경 PNG (window 영역에 깔림)
+        #   --window-size       : Finder 창 크기
+        #   --icon-size         : 아이콘 픽셀 크기
+        #   --icon              : 앱 아이콘 위치
+        #   --app-drop-link     : Applications 심볼릭 링크 위치
+        #   --no-internet-enable: extended attributes 깔끔하게
+        BG_FLAG=()
+        [[ -f "${BG_SRC}" ]] && BG_FLAG=(--background "${BG_SRC}")
+
+        create-dmg \
+            --volname "${APP_NAME}" \
+            "${BG_FLAG[@]}" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 96 \
+            --icon "${APP_NAME}.app" 150 220 \
+            --app-drop-link 450 220 \
+            --no-internet-enable \
+            "${DIST_DIR}/${DMG_NAME}" \
+            "${DIST_DIR}/${APP_NAME}.app" 2>&1 | tail -5
     fi
-
-    # 1) 쓰기 가능한 DMG 생성 + 마운트
-    hdiutil create -volname "${APP_NAME}" \
-        -srcfolder "${DMG_TMP}" \
-        -fs HFS+ -format UDRW -ov \
-        "${DMG_RW}" >/dev/null
-
-    MOUNT_DIR="$(hdiutil attach -readwrite -noverify "${DMG_RW}" | \
-        awk -F'\t' '/\/Volumes\//{print $NF; exit}')"
-    sleep 1
-
-    # 2) AppleScript로 윈도우 크기/배경/아이콘 위치 적용
-    if [[ -f "${BG_SRC}" ]]; then
-        # 콜론이 들어간 alias 표현 — 마운트 볼륨명 기준
-        VOLNAME="${APP_NAME}"
-        osascript <<APPLESCRIPT
-tell application "Finder"
-    tell disk "${VOLNAME}"
-        open
-        set current view of container window to icon view
-        set toolbar visible of container window to false
-        set statusbar visible of container window to false
-        set the bounds of container window to {300, 200, 900, 600}
-        set viewOptions to the icon view options of container window
-        set arrangement of viewOptions to not arranged
-        set icon size of viewOptions to 96
-        try
-            set background picture of viewOptions to POSIX file "${MOUNT_DIR}/.background/bg.png"
-        end try
-        set position of item "${APP_NAME}.app" of container window to {150, 220}
-        set position of item "Applications" of container window to {450, 220}
-        update without registering applications
-        delay 1
-        close
-    end tell
-end tell
-APPLESCRIPT
-        sync
-    fi
-
-    # 3) 언마운트 + 압축본으로 변환
-    hdiutil detach "${MOUNT_DIR}" -quiet || true
-    hdiutil convert "${DMG_RW}" -format UDZO -imagekey zlib-level=9 \
-        -ov -o "${DIST_DIR}/${DMG_NAME}" >/dev/null
-
-    rm -rf "${DMG_TMP}" "${DMG_RW}"
     echo "  DMG: ${DIST_DIR}/${DMG_NAME}"
 fi
 
