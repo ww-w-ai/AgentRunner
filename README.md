@@ -22,7 +22,7 @@ There are beautiful projects that visualize multi-agent work like a video game. 
 
 ## How it works
 
-AgentRunner watches outbound **network traffic** to known LLM API endpoints via macOS `nettop`. It maps bytes-per-second to character state and animation speed — simple by design. The trick is *why* this approach is the right one:
+AgentRunner watches outbound **network traffic** to known LLM API endpoints via macOS `nettop`. It maps bytes-per-second to character state and animation speed:
 
 - **Lightweight** — `nettop` is a single OS-level subprocess that watches every session at once. CPU < 1%.
 - **Accurate** — LLMs run over an API, so the network traffic *is* the ground truth of activity. No heuristics, no guessing.
@@ -196,4 +196,4 @@ Inspired by [RunCat](https://kyome.io/runcat/) by Takuto Nakamura.
 
 ## License
 
-Apache License 2.0 — same as [RunCat](https://kyome.io/runcat/), our spiritual ancestor. See [LICENSE](LICENSE) for the full text.
+Apache License 2.0. See [LICENSE](LICENSE) for the full text.

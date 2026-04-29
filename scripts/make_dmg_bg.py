@@ -68,11 +68,31 @@ d.polygon(
     fill=ACCENT,
 )
 
-# Footer hint
-hint = "First launch: right-click the app → Open (Gatekeeper bypass)"
-f_hint = font(11)
-hw, hh = d.textbbox((0, 0), hint, font=f_hint)[2:]
-d.text(((W - hw) / 2, H - 36), hint, fill=ACCENT, font=f_hint)
+# Step labels under each icon
+f_step = font(11)
+step1 = "1. Drag to Applications"
+s1w = d.textbbox((0, 0), step1, font=f_step)[2]
+d.text((150 - s1w / 2, 280), step1, fill=ACCENT, font=f_step)
+
+step2 = "2. Drop here"
+s2w = d.textbbox((0, 0), step2, font=f_step)[2]
+d.text((450 - s2w / 2, 280), step2, fill=ACCENT, font=f_step)
+
+# Footer — how to launch (the trickiest step for menu bar apps)
+f_launch = font(13)
+launch_title = "After install — open with Spotlight:"
+ltw = d.textbbox((0, 0), launch_title, font=f_launch)[2]
+d.text(((W - ltw) / 2, H - 70), launch_title, fill=TEXT, font=f_launch)
+
+f_kbd = font(14, bold=True)
+launch_step = "⌘ + Space  →  type \"AgentRunner\"  →  Enter"
+lsw = d.textbbox((0, 0), launch_step, font=f_kbd)[2]
+d.text(((W - lsw) / 2, H - 50), launch_step, fill=TEXT, font=f_kbd)
+
+f_hint = font(10)
+hint = "Look for the pixel character in your menu bar (top-right)"
+hw = d.textbbox((0, 0), hint, font=f_hint)[2]
+d.text(((W - hw) / 2, H - 28), hint, fill=ACCENT, font=f_hint)
 
 img.save(OUT)
 print(f"DMG bg → {OUT} ({W}x{H})")

@@ -33,6 +33,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let updateCheckTTL: TimeInterval = 3600   // 1h cache
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Launchpad에 노출되도록 LSUIElement는 NO로 두되, 런타임에 accessory 정책으로
+        // Dock/Cmd-Tab 아이콘만 숨김. (LSUIElement=YES면 Launchpad에서도 사라져 사용자가 못 찾음)
+        NSApp.setActivationPolicy(.accessory)
+
         // Single-instance lock — 같은 bundle ID의 다른 인스턴스 있으면 자기 종료
         let myPID = ProcessInfo.processInfo.processIdentifier
         let bundleID = Bundle.main.bundleIdentifier ?? ""
