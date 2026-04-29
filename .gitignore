@@ -1,0 +1,47 @@
+# macOS
+.DS_Store
+
+# Xcode
+build/
+DerivedData/
+*.xcuserdata/
+xcuserdata/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+default.profraw
+
+# Python (build/sprite scripts)
+__pycache__/
+*.pyc
+*.pyo
+
+# Local-only scripts (sprite source transformer — kept on author's machine)
+scripts/transform_sprites.py
+
+# Swift Package Manager
+.swiftpm/
+.build/
+Packages/
+Package.pins
+Package.resolved
+
+# Distribution artifacts
+dist/
+*.dmg
+*.zip
+*.app
+
+# Personal / review-only docs (Korean internal notes — not for public repo)
+README.ko.md
+NOTES.ko.md
+CLAUDE.ko.md
+
+# Local environment
+.env
+.env.local
+
+# bkit local state (audit logs, PDCA status, session history)
+.bkit/
+
+# Claude Code local config
+.claude/
