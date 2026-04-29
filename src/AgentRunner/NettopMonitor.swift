@@ -19,6 +19,8 @@ final class NettopMonitor {
     var onEvent: ((NettopEvent) -> Void)?
 
     func start() {
+        // stop() 이후 다시 start() 가능하도록 플래그 리셋 — sleep/wake 사이클에 필수.
+        isShuttingDown = false
         // Blocklist 콜백 주입 → 파서 진입에서 즉시 short-circuit
         parser.isProcessBlocked = { Blocklist.isBlocked($0) }
         spawnNettop()
