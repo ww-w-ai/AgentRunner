@@ -299,12 +299,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // .jsonc는 macOS에 등록된 기본 핸들러가 없어 "연결된 앱 없음" 다이얼로그가 뜨는 경우가 많음.
         // 1) 먼저 jsonc-aware 에디터(VS Code / Cursor / Sublime) 명시적 시도
         // 2) 실패 시 `open -t`로 시스템 기본 텍스트 에디터 (TextEdit 보장)
+        // 바이브코더/AI-native 에디터 우선 → 전통 에디터 폴백
         let editorBundleIDs = [
-            "com.microsoft.VSCode",       // Visual Studio Code
+            // AI-native (vibe coder favorites)
             "com.todesktop.230313mzl4w4u92",  // Cursor
-            "com.sublimetext.4",          // Sublime Text 4
+            "com.microsoft.VSCode",            // VS Code (Copilot/Continue.dev/Cline)
+            "dev.zed.Zed",                     // Zed
+            "com.exafunction.windsurf",        // Windsurf (by Exafunction/Codeium)
+            "com.trae.app",                    // Trae (ByteDance, Claude free tier)
+            // Mainstream / native
+            "com.jetbrains.fleet",             // JetBrains Fleet
+            "com.panic.Nova",                  // Nova (Panic, native Mac)
+            "com.sublimetext.4",               // Sublime Text 4
             "com.sublimetext.3",
-            "com.barebones.bbedit",       // BBEdit
+            "com.barebones.bbedit",            // BBEdit
         ]
         for bundleID in editorBundleIDs {
             if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
