@@ -148,8 +148,10 @@ final class ProviderRegistry {
 
     // MARK: - Instance state
 
-    private let refreshInterval: TimeInterval = 600  // 10분
-    private var ipToProvider: [String: String] = [:]
+    private let refreshInterval: TimeInterval = 60   // 1분 — Cloudflare 등 짧은 TTL 추적
+    private let entryTTL: TimeInterval = 3600        // 1시간 — 한 번 본 IP는 이 기간 동안 유효
+    private struct Entry { let provider: String; var expiresAt: Date }
+    private var ipToProvider: [String: Entry] = [:]
     private let lock = NSLock()
     private var refreshTimer: DispatchSourceTimer?
     private var changeObserver: NSObjectProtocol?
@@ -215,7 +217,12 @@ final class ProviderRegistry {
 
     func providerName(forIP ip: String) -> String? {
         lock.lock(); defer { lock.unlock() }
-        return ipToProvider[ip]
+        guard let entry = ipToProvider[ip] else { return nil }
+        if entry.expiresAt < Date() {
+            ipToProvider.removeValue(forKey: ip)
+            return nil
+        }
+        return entry.provider
     }
 
     private func scheduleRefresh() {
@@ -229,20 +236,31 @@ final class ProviderRegistry {
     private func refreshNow() {
         DispatchQueue.global(qos: .background).async { [weak self] in
             guard let self = self else { return }
-            var newMap: [String: String] = [:]
+            let now = Date()
+            let newExpiry = now.addingTimeInterval(self.entryTTL)
+            var freshSeen: [(ip: String, provider: String)] = []
             for provider in Self.effectiveProviders() {
                 for host in provider.hosts {
                     for ip in self.resolve(host) {
-                        if newMap[ip] == nil {
-                            newMap[ip] = provider.name
-                        }
+                        freshSeen.append((ip, provider.name))
                     }
                 }
             }
             self.lock.lock()
-            self.ipToProvider = newMap
+            // 만료된 엔트리 제거
+            self.ipToProvider = self.ipToProvider.filter { $0.value.expiresAt >= now }
+            // 이번에 본 IP는 추가하거나 만료시각 갱신 (누적)
+            for (ip, name) in freshSeen {
+                if var existing = self.ipToProvider[ip] {
+                    existing.expiresAt = newExpiry
+                    self.ipToProvider[ip] = existing
+                } else {
+                    self.ipToProvider[ip] = Entry(provider: name, expiresAt: newExpiry)
+                }
+            }
+            let total = self.ipToProvider.count
             self.lock.unlock()
-            NSLog("AgentRunner: providers refreshed, \(newMap.count) IPs cached")
+            NSLog("AgentRunner: providers refreshed, \(freshSeen.count) resolved, \(total) IPs cached")
         }
     }
 
