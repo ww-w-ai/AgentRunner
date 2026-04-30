@@ -29,8 +29,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case error(String)
     }
     private var updateState: UpdateState = .idle
-    private var lastUpdateCheck: Date = .distantPast
-    private let updateCheckTTL: TimeInterval = 3600   // 1h cache
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Launchpad에 노출되도록 LSUIElement는 NO로 두되, 런타임에 accessory 정책으로
@@ -64,8 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         NSLog("AgentRunner: launched")
 
-        // 앱 시작 시 1회 백그라운드 체크
-        Task { await self.runUpdateCheck() }
+        // 업데이트 체크는 메뉴 열 때만 — 메뉴 안 열면 결과 볼 곳도 없음.
 
         // 첫 실행 시 Launch at Login 활성화 의향 확인
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
@@ -191,12 +188,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - NSMenuDelegate
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        // 메뉴 열 때 launch-at-login 상태 + update TTL 체크
+        // 메뉴 열 때마다 launch-at-login 상태 + update 체크 (HEAD 1회, 부담 없음).
+        // 진행 중이면 skip — concurrent 요청 방지.
         launchAtLoginItem.state = LoginItem.isEnabled ? .on : .off
-        let stale = Date().timeIntervalSince(lastUpdateCheck) >= updateCheckTTL
-        if stale, case .checking = updateState {
-            // 이미 체크 중 — skip
-        } else if stale {
+        if case .checking = updateState {
+            // already in flight
+        } else {
             Task { await self.runUpdateCheck() }
         }
         refreshUpdateMenuItem()
@@ -205,6 +202,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Update flow
 
     private func runUpdateCheck() async {
+        // 오프라인이면 HTTP 시도하지 않고 즉시 에러 — 10초 timeout 낭비 방지.
+        if !registry.isOnline {
+            await MainActor.run {
+                self.updateState = .error("No internet connection")
+                self.refreshUpdateMenuItem()
+            }
+            return
+        }
         await MainActor.run {
             self.updateState = .checking
             self.refreshUpdateMenuItem()
@@ -219,7 +224,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .error(let msg):
                 self.updateState = .error(msg)
             }
-            self.lastUpdateCheck = Date()
             self.refreshUpdateMenuItem()
         }
     }
@@ -260,7 +264,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         // 강제 재체크
-        lastUpdateCheck = .distantPast
         Task { await self.runUpdateCheck() }
     }
 
