@@ -35,15 +35,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Dock/Cmd-Tab 아이콘만 숨김. (LSUIElement=YES면 Launchpad에서도 사라져 사용자가 못 찾음)
         NSApp.setActivationPolicy(.accessory)
 
-        // Single-instance lock — 같은 bundle ID의 다른 인스턴스 있으면 자기 종료
-        let myPID = ProcessInfo.processInfo.processIdentifier
-        let bundleID = Bundle.main.bundleIdentifier ?? ""
-        let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-            .filter { $0.processIdentifier != myPID }
-        if !others.isEmpty {
-            NSLog("AgentRunner: another instance already running (pid=\(others.first?.processIdentifier ?? 0)), exiting")
-            NSApp.terminate(nil)
-            return
+        // Single-instance lock — 같은 bundle ID의 다른 인스턴스 있으면 자기 종료.
+        // 단, XCTest 환경에서는 호스트 앱이 죽으면 테스트 부트스트랩이 실패하므로 스킵.
+        let isUnderTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        if !isUnderTest {
+            let myPID = ProcessInfo.processInfo.processIdentifier
+            let bundleID = Bundle.main.bundleIdentifier ?? ""
+            let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+                .filter { $0.processIdentifier != myPID }
+            if !others.isEmpty {
+                NSLog("AgentRunner: another instance already running (pid=\(others.first?.processIdentifier ?? 0)), exiting")
+                NSApp.terminate(nil)
+                return
+            }
         }
 
         setupStatusItem()

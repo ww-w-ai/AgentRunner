@@ -215,6 +215,16 @@ final class ProviderRegistry {
         pathMonitor = monitor
     }
 
+    /// Test helper: inject a static IP→provider mapping with a far-future expiry.
+    /// Internal access only — used by AgentRunnerTests via @testable import.
+    internal func testInjectStaticMapping(_ map: [String: String]) {
+        lock.lock(); defer { lock.unlock() }
+        let farFuture = Date.distantFuture
+        for (ip, name) in map {
+            ipToProvider[ip] = Entry(provider: name, expiresAt: farFuture)
+        }
+    }
+
     func providerName(forIP ip: String) -> String? {
         lock.lock(); defer { lock.unlock() }
         guard let entry = ipToProvider[ip] else { return nil }

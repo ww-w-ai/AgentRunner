@@ -39,9 +39,11 @@ final class NettopParser {
         guard cols.count >= 6 else { return nil }
 
         // 헤더 라인 감지: 첫 컬럼이 "time"
+        // nettop -x periodic 모드에서 매 스냅샷마다 헤더가 한 번씩 출력됨.
+        // 이전 스냅샷의 모든 라인이 도착한 시점이므로 boundary로 사용.
         if cols[0] == "time" {
             updateColumnIndices(cols)
-            return nil
+            return .snapshotBoundary
         }
 
         let nameField = cols[1]

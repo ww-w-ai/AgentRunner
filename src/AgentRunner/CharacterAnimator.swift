@@ -342,7 +342,7 @@ final class CharacterAnimator {
         case .idle:           return 0.25
         case .rest:           return 2.5    // 매우 천천히 (5s 풀 사이클)
         case .scout:          return 0.30
-        case .run:            return runIntervalForRate(rate)
+        case .run:            return CharacterAnimator.runIntervalForRate(rate)
         case .jump:           return jumpFrameInterval
         case .threeHit:       return comboFrameInterval
         case .supreme:        return ultimateFrameInterval
@@ -352,7 +352,7 @@ final class CharacterAnimator {
 
     /// RUNNING 속도 = bytes_in_rate에 비례 (로그 스케일).
     /// 50 B/s 이하 = 350ms (느린 걷기), 50 KB/s 이상 = 50ms (질주).
-    private func runIntervalForRate(_ r: Double) -> TimeInterval {
+    internal static func runIntervalForRate(_ r: Double) -> TimeInterval {
         let floor: Double = 50
         let r = max(floor, r)
         let logR = log10(r)             // 50 → 1.7, 50000 → 4.7

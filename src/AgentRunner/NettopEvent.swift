@@ -17,4 +17,7 @@ enum NettopEvent {
         bytesIn: UInt64,
         bytesOut: UInt64
     )
+    /// nettop 스냅샷 경계 — 이전 스냅샷의 모든 라인이 도착했음을 의미.
+    /// SessionManager는 이 이벤트를 받자마자 pendingConns를 처리한다.
+    case snapshotBoundary
 }
