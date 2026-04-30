@@ -158,6 +158,9 @@ final class ProviderRegistry {
     private var pathRefreshWorkItem: DispatchWorkItem?
     private var hasReceivedInitialPath = false
 
+    /// 마지막으로 관측된 네트워크 도달성. 첫 업데이트 전에는 true (낙관적 가정).
+    private(set) var isOnline: Bool = true
+
     func start() {
         refreshNow()
         scheduleRefresh()
@@ -188,8 +191,9 @@ final class ProviderRegistry {
 
     private func startPathMonitor() {
         let monitor = NWPathMonitor()
-        monitor.pathUpdateHandler = { [weak self] _ in
+        monitor.pathUpdateHandler = { [weak self] path in
             guard let self = self else { return }
+            self.isOnline = (path.status == .satisfied)
             // Skip the initial delivery; start() already kicked off refreshNow().
             guard self.hasReceivedInitialPath else {
                 self.hasReceivedInitialPath = true

@@ -20,6 +20,54 @@ There are beautiful projects that visualize multi-agent work like a video game. 
 
 ---
 
+## Performance
+
+AgentRunner is built to be a **zero-distraction peripheral**. Targets, idle:
+
+- CPU: **< 1%**
+- Memory: **~20 MB**
+- Battery impact: pauses on system sleep, resumes on wake
+
+If you ever see it climb above that, file an issue.
+
+---
+
+## Install
+
+> Requires macOS 13 (Ventura) or later. Apple Silicon and Intel both supported.
+
+1. Download the latest `AgentRunner-x.y.dmg` from [Releases](https://github.com/ww-w-ai/AgentRunner/releases).
+2. Open the DMG → drag `AgentRunner.app` into `/Applications`.
+3. **First launch — bypass Gatekeeper** (one time only). The app isn't yet notarized with a paid Apple Developer ID, so macOS blocks the first launch:
+   - **macOS 13–14 (Ventura/Sonoma):** Right-click `AgentRunner.app` → **Open** → confirm.
+   - **macOS 15+ (Sequoia):** Double-click → you'll see a "blocked" dialog → click **Done**. Then go to **System Settings → Privacy & Security**, scroll to the bottom, and click **Open Anyway** next to the AgentRunner entry → confirm with password.
+   - **Terminal one-liner (any version):**
+     ```bash
+     xattr -dr com.apple.quarantine /Applications/AgentRunner.app
+     ```
+4. Look for the pixel character in your menu bar (top-right). Right-click for settings, left-click for active sessions.
+
+Subsequent launches just work.
+
+### Alternative: Homebrew
+
+For CLI-friendly users who prefer `brew upgrade` over manual download:
+
+```bash
+brew tap ww-w-ai/tap
+brew install --cask agentrunner
+```
+
+Brew strips the quarantine attribute, but Sequoia's notarization check still triggers, so the **Privacy & Security → Open Anyway** step above is still required on first launch.
+
+To upgrade later:
+```bash
+brew update
+brew upgrade --cask agentrunner
+```
+
+---
+
 ## How it works
 
 AgentRunner watches outbound **network traffic** to known LLM API endpoints via macOS `nettop`. It maps bytes-per-second to character state and animation speed:
@@ -65,7 +113,7 @@ Out of the box, AgentRunner detects traffic to the official API endpoints of the
 | **Together**   | `api.together.xyz`                                                 | Open-source model hosting                     |
 | **Perplexity** | `api.perplexity.ai`                                                | Sonar series                                  |
 
-Hosts are resolved via `dig` at startup and re-cached every 10 minutes, so CDN / Anycast IP rotation is handled automatically.
+Hosts are resolved via `dig` at startup, on every 10-minute tick, on system wake, and whenever the network path changes (Wi-Fi switch, VPN toggle, LTE handoff). CDN / Anycast IP rotation is handled automatically.
 
 ---
 
@@ -122,42 +170,6 @@ Check the provider's official API docs for the base URL, or run `nettop -P -m tc
 
 ---
 
-## Install
-
-> Requires macOS 13 (Ventura) or later. Apple Silicon and Intel both supported.
-
-1. Download the latest `AgentRunner-x.y.dmg` from [Releases](https://github.com/ww-w-ai/AgentRunner/releases).
-2. Open the DMG → drag `AgentRunner.app` into `/Applications`.
-3. **First launch — bypass Gatekeeper** (one time only). The app isn't yet notarized with a paid Apple Developer ID, so macOS blocks the first launch:
-   - **macOS 13–14 (Ventura/Sonoma):** Right-click `AgentRunner.app` → **Open** → confirm.
-   - **macOS 15+ (Sequoia):** Double-click → you'll see a "blocked" dialog → click **Done**. Then go to **System Settings → Privacy & Security**, scroll to the bottom, and click **Open Anyway** next to the AgentRunner entry → confirm with password.
-   - **Terminal one-liner (any version):**
-     ```bash
-     xattr -dr com.apple.quarantine /Applications/AgentRunner.app
-     ```
-4. Look for the pixel character in your menu bar (top-right). Right-click for settings, left-click for active sessions.
-
-Subsequent launches just work.
-
-### Alternative: Homebrew
-
-For CLI-friendly users who prefer `brew upgrade` over manual download:
-
-```bash
-brew tap ww-w-ai/tap
-brew install --cask agentrunner
-```
-
-Brew strips the quarantine attribute, but Sequoia's notarization check still triggers, so the **Privacy & Security → Open Anyway** step above is still required on first launch.
-
-To upgrade later:
-```bash
-brew update
-brew upgrade --cask agentrunner
-```
-
----
-
 ## Menu
 
 No window, no extra UI. Everything lives behind a right-click on the character (RunCat-style):
@@ -171,18 +183,6 @@ No window, no extra UI. Everything lives behind a right-click on the character (
 - **Quit AgentRunner**
 
 Left-click opens a popover showing active sessions (one row per LLM stream).
-
----
-
-## Performance
-
-AgentRunner is built to be a **zero-distraction peripheral**. Targets, idle:
-
-- CPU: **< 1%**
-- Memory: **~25–30 MB**
-- Battery impact: pauses on system sleep, resumes on wake
-
-If you ever see it climb above that, file an issue.
 
 ---
 

@@ -8,7 +8,7 @@ This file gives Claude Code (and any human contributor) the context needed to wo
 
 - **Language:** Swift / AppKit (no NSWindow — RunCat pattern)
 - **Platform:** macOS 13+ (Ventura)
-- **License:** Apache 2.0 (matches RunCat)
+- **License:** Apache 2.0
 - **Dependencies:** none — Swift standard library only
 - **Pixel art:** rvros [Animated Pixel Hero](https://rvros.itch.io/animated-pixel-hero)
 
@@ -23,7 +23,8 @@ AgentRunner/                     # project root
 │       └── Assets.xcassets/     # 50+ pixel sprite imagesets
 ├── docs/gifs/                   # README GIFs (hero + 8 animations)
 ├── scripts/
-│   ├── build_release.sh         # Release build + DMG (ad-hoc signed)
+│   ├── build_release.sh         # Release build + DMG (ad-hoc signed, uses create-dmg)
+│   ├── make_dmg_bg.py           # Generate docs/dmg_bg.png (drag-to-install hint)
 │   └── make_gifs.py             # imageset → docs/gifs (project-internal paths only)
 ├── dist/                        # build artifacts (gitignored)
 ├── README.md                    # public English doc
@@ -108,7 +109,7 @@ enum AnimID {
 - **First launch:** seed file written via `writeSeedFile()`, in-memory `seedProviders` constant returned
 - **Subsequent launches:** the file is the single source of truth. Edit + menu → Reload Providers (⌘R)
 - **Parse failure:** falls back to seed providers, file untouched (so user can fix and reload)
-- **IP matching:** `dig +short` resolves hostnames, refreshed every 10 minutes
+- **IP matching:** `dig +short` resolves hostnames. Refresh triggers: app start, every 10 minutes, system wake (`AppDelegate.receiveWake` → `registry.refresh()`), and on network path change (NWPathMonitor inside `ProviderRegistry`, debounced 1s) — covers Wi-Fi switch, VPN toggle, LTE handoff. `isOnline` flag is also exposed for `UpdateChecker` to short-circuit when offline.
 - **⚠️ Adding new built-ins via `seedProviders` constant alone won't reach existing users** — their `providers.jsonc` was already written. A migration step (merge missing built-ins) would be needed.
 
 ### 5. SessionPopover (left-click) — race-free
@@ -132,13 +133,13 @@ python3 scripts/make_gifs.py
 
 **Code signing:** ad-hoc (`--sign -`) by default. Set `CODESIGN_IDENTITY` env var if you have an Apple Developer ID.
 
-**Version:** `MARKETING_VERSION` in Build Settings (currently `1.0`). Extracted via PlistBuddy in the build script.
+**Version:** `MARKETING_VERSION` in `src/AgentRunner.xcodeproj/project.pbxproj` (6 occurrences — keep in sync). Extracted via PlistBuddy in the build script.
 
 ## Coding Conventions
 
 - Logging: `NSLog("AgentRunner: ...")` — visible in Console.app
 - Bundle ID: see project settings; `SMAppService` / Login Item depend on it
-- **Zero-dependency principle.** Adding a third-party library should be debated, not casual. Even auto-update (Sparkle) was deliberately avoided in favor of direct GitHub Releases API calls.
+- **Zero-dependency principle.** Adding a third-party library should be debated, not casual. Even auto-update (Sparkle) was deliberately avoided. `UpdateChecker` does a HEAD request against `https://github.com/<slug>/releases/latest` and reads the 302 `Location` header to extract the latest tag — avoids the GitHub REST API's 60/h per-IP rate limit (a real risk for users behind shared NAT). Asset URLs are constructed from naming convention (`AgentRunner-X.Y.Z.dmg`).
 - `// MARK: -` for section headers in Swift files
 
 ## What NOT to Do
@@ -147,15 +148,15 @@ python3 scripts/make_gifs.py
 - **Never expose `Session` (reference type) to the main thread.** Always go through `sessionSnapshot()` which returns `SessionSnapshot` value copies.
 - **Never commit build/release artifacts** (`dist/`, `*.dmg`, `*.app`) — they're in `.gitignore`.
 - **Never hardcode absolute paths** (`/Users/...`). All paths in scripts must be derived from `__file__` (Python) or relative to script dir (shell).
+- **Never leave `NettopMonitor.isShuttingDown = true` after `stop()`.** `start()` resets it to `false` first; if you remove that reset, `spawnNettop()` will silently `return` on the very next start (sleep/wake cycle bug fixed in v1.0.9). The same pattern applies to any future "shutdown flag" — reset on the next start, not at the end of stop, to keep stop idempotent.
 
 ## FAQ — Decisions That Should Not Be Re-Litigated
 
 - **Why nettop?** It's an OS tool — no permissions, no proxy, no certificates needed. Network traffic to known LLM hosts is the ground truth of agent activity. Heuristics on file/clipboard/process activity would be both more invasive and less accurate.
-- **Why AppKit instead of SwiftUI?** Menu bar apps are NSStatusItem-native. AppKit gives precise control with ~25–30 MB memory footprint. SwiftUI for menu bar would add overhead with no UX win.
+- **Why AppKit instead of SwiftUI?** Menu bar apps are NSStatusItem-native. AppKit gives precise control with ~20 MB idle memory footprint (flat regardless of session count). SwiftUI for menu bar would add overhead with no UX win.
 - **Why no NSWindow / Preferences window?** RunCat-style minimalism. Pref windows add memory cost for a feature used rarely. The menu (right-click) handles all settings.
 - **Why was the `enabled` field removed from providers.jsonc guidance?** Disabling = comment out the line with `//`. One mechanism is simpler than two. The struct still tolerates the field for backward compatibility.
 - **Why is `transform_sprites.py` local-only?** Its input is outside the project (`~/Downloads/Adventurer-1.5/`), so it can't run on a clone. `make_gifs.py` (imageset → docs/gifs/) is project-internal and shipped.
-- **Why Apache 2.0?** Matches RunCat (our ancestor). The patent grant clause better protects OSS contributors than MIT.
 
 ## Starting a New Session
 

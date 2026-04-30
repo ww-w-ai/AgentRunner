@@ -14,6 +14,15 @@ enum UpdateResult {
     case error(String)
 }
 
+/// URLSession redirect 차단용 delegate — HEAD 응답의 Location 헤더만 읽기 위함.
+private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest) async -> URLRequest? {
+        nil
+    }
+}
+
 enum UpdateChecker {
 
     /// GitHub repo. 배포 전 본인 repo로 교체.
@@ -23,41 +32,43 @@ enum UpdateChecker {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0"
     }
 
+    /// `github.com/<slug>/releases/latest` HEAD → 302 Location 헤더의 tag만 읽음.
+    /// API rate limit (60/h per IP)을 회피하기 위해 web URL + HEAD 방식을 사용.
     static func check() async -> UpdateResult {
-        let url = URL(string: "https://api.github.com/repos/\(repoSlug)/releases/latest")!
+        let url = URL(string: "https://github.com/\(repoSlug)/releases/latest")!
         var req = URLRequest(url: url)
-        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.httpMethod = "HEAD"
         req.timeoutInterval = 10
 
+        let session = URLSession(configuration: .ephemeral,
+                                 delegate: NoRedirectDelegate(),
+                                 delegateQueue: nil)
+
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (_, resp) = try await session.data(for: req)
             guard let http = resp as? HTTPURLResponse else {
                 return .error("Invalid response")
             }
             if http.statusCode == 404 {
                 return .error("Repository or releases not found")
             }
-            guard http.statusCode == 200 else {
-                return .error("HTTP \(http.statusCode)")
-            }
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let tag = json["tag_name"] as? String,
-                  let htmlURLStr = json["html_url"] as? String,
-                  let releaseURL = URL(string: htmlURLStr) else {
-                return .error("Malformed release JSON")
+            guard http.statusCode == 302 || http.statusCode == 301,
+                  let loc = http.value(forHTTPHeaderField: "Location"),
+                  let locURL = URL(string: loc) else {
+                return .error("HTTP \(http.statusCode) — no redirect")
             }
 
+            // Location 형태: https://github.com/<slug>/releases/tag/v1.0.9
+            let tag = locURL.lastPathComponent  // "v1.0.9"
             let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
             let curr = current
 
-            // DMG asset URL 우선, 없으면 release page URL
-            var downloadURL = releaseURL
-            if let assets = json["assets"] as? [[String: Any]] {
-                if let dmg = assets.first(where: { ($0["name"] as? String)?.hasSuffix(".dmg") == true }),
-                   let urlStr = dmg["browser_download_url"] as? String,
-                   let u = URL(string: urlStr) {
-                    downloadURL = u
-                }
+            // DMG asset URL은 명명 규약으로 직접 구성 (build_release.sh 기준).
+            let downloadStr = "https://github.com/\(repoSlug)/releases/download/\(tag)/AgentRunner-\(latest).dmg"
+            let releaseStr = "https://github.com/\(repoSlug)/releases/tag/\(tag)"
+            guard let downloadURL = URL(string: downloadStr),
+                  let releaseURL = URL(string: releaseStr) else {
+                return .error("Malformed URL construction")
             }
 
             if compareVersions(latest, curr) > 0 {
@@ -83,8 +94,7 @@ enum UpdateChecker {
         return 0
     }
 
-    // 자동 체크 인프라는 의도적으로 없음 — Preferences 창 열 때 1회만 체크.
-    // 사용자에게 알림을 강요하지 않고, 본인이 설정 보러 들어왔을 때만 노출.
+    // 메뉴 열 때마다 자동 체크. HEAD 1회 (~100B)라 부담 없음.
 
     /// 설치 경로 감지 — 업데이트 가이드 분기에 사용.
     enum InstallSource {
