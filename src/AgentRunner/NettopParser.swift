@@ -87,8 +87,8 @@ final class NettopParser {
         let endpoints = parts.components(separatedBy: "<->")
         guard endpoints.count == 2 else { return nil }
 
-        guard let (srcIP, srcPort) = splitHostPort(endpoints[0]),
-              let (dstIP, dstPort) = splitHostPort(endpoints[1]) else {
+        guard let (srcIP, srcPort) = splitHostPort(endpoints[0], proto: proto),
+              let (dstIP, dstPort) = splitHostPort(endpoints[1], proto: proto) else {
             return nil
         }
 
@@ -103,16 +103,24 @@ final class NettopParser {
         )
     }
 
-    private func splitHostPort(_ s: String) -> (host: String, port: Int)? {
-        // IPv6는 "[::1]:443" 같은 표기. IPv4는 "1.2.3.4:443".
-        // 호스트명 ("xxx.1e100.net:443")도 가능.
-        guard let colonIdx = s.lastIndex(of: ":") else { return nil }
-        let hostPart = s[..<colonIdx]
-        let portPart = s[s.index(after: colonIdx)...]
+    private func splitHostPort(_ s: String, proto: String) -> (host: String, port: Int)? {
+        // nettop 표기 (대괄호 안 씀):
+        //   tcp4/udp4 → "1.2.3.4:443" 또는 "host.com:443"  (포트는 ':' 뒤)
+        //   tcp6/udp6 → "2607:6bc0::10.443" 또는 "host.com.443" (포트는 마지막 '.' 뒤)
+        let isV6 = proto.hasSuffix("6")
+        let sepIdx: String.Index?
+        if isV6 {
+            sepIdx = s.lastIndex(of: ".")
+        } else {
+            sepIdx = s.lastIndex(of: ":")
+        }
+        guard let idx = sepIdx else { return nil }
+        let hostPart = s[..<idx]
+        let portPart = s[s.index(after: idx)...]
         // 와일드카드 포트("*") 제외
         guard let port = Int(portPart) else { return nil }
-        // IPv6 대괄호 제거
         var host = String(hostPart)
+        // 혹시 모를 IPv6 대괄호 표기 호환
         if host.hasPrefix("["), host.hasSuffix("]") {
             host = String(host.dropFirst().dropLast())
         }

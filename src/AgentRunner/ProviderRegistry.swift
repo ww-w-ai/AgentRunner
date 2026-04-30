@@ -269,9 +269,15 @@ final class ProviderRegistry {
             if let colon = host.firstIndex(of: ":") { return String(host[..<colon]) }
             return host
         }()
+        // dig 기본은 A(IPv4)만 반환. macOS가 IPv6로 routing할 때 매칭이 0이 돼 망가지므로
+        // A와 AAAA를 모두 조회한다. (Claude Code → api.anthropic.com 트래픽은 IPv6로 나감)
+        return digQuery(pureHost, type: "A") + digQuery(pureHost, type: "AAAA")
+    }
+
+    private func digQuery(_ host: String, type: String) -> [String] {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/dig")
-        proc.arguments = ["+short", "+timeout=2", "+tries=1", pureHost]
+        proc.arguments = ["+short", "+timeout=2", "+tries=1", "-t", type, host]
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = Pipe()

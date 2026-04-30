@@ -93,10 +93,10 @@ if [[ "${1:-}" == "--dmg" ]]; then
             --volname "${APP_NAME}" \
             "${BG_FLAG[@]}" \
             --window-pos 200 120 \
-            --window-size 600 400 \
+            --window-size 600 540 \
             --icon-size 96 \
-            --icon "${APP_NAME}.app" 150 220 \
-            --app-drop-link 450 220 \
+            --icon "${APP_NAME}.app" 150 240 \
+            --app-drop-link 450 240 \
             --no-internet-enable \
             "${DIST_DIR}/${DMG_NAME}" \
             "${DIST_DIR}/${APP_NAME}.app" 2>&1 | tail -5

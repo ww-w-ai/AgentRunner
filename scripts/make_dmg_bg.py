@@ -10,7 +10,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT = os.path.join(ROOT, "docs", "dmg_bg.png")
 
-W, H = 600, 400
+W, H = 600, 460
+BOTTOM_SAFE = 56  # Finder pathbar/statusbar reserves ~28px on modern macOS — keep margin
 BG = (250, 250, 252, 255)
 ACCENT = (90, 100, 120, 255)
 ACCENT_LIGHT = (90, 100, 120, 80)
@@ -48,8 +49,8 @@ sw, sh = d.textbbox((0, 0), subtitle, font=f_sub)[2:]
 d.text(((W - sw) / 2, 72), subtitle, fill=ACCENT, font=f_sub)
 
 # Arrow (between icon positions)
-# Icons will be placed at ~ (150, 220) and (450, 220) in a 600x400 window
-arrow_y = 220
+# Icons will be placed at ~ (150, 240) and (450, 240) in a 600x460 window
+arrow_y = 240
 arrow_start_x = 230
 arrow_end_x = 370
 shaft_thickness = 6
@@ -68,21 +69,24 @@ d.polygon(
     fill=ACCENT,
 )
 
-# Footer — how to launch (the trickiest step for menu bar apps)
-f_launch = font(13)
-launch_title = "After install — open with Spotlight:"
-ltw = d.textbbox((0, 0), launch_title, font=f_launch)[2]
-d.text(((W - ltw) / 2, H - 70), launch_title, fill=TEXT, font=f_launch)
+# Footer — how to launch (the trickiest step for menu bar apps).
+# Stack upward from BOTTOM_SAFE so Finder's pathbar/statusbar can't clip text.
+f_hint = font(10)
+hint = "Look for the pixel character in your menu bar (top-right)"
+hw = d.textbbox((0, 0), hint, font=f_hint)[2]
+hint_y = H - BOTTOM_SAFE
+d.text(((W - hw) / 2, hint_y), hint, fill=ACCENT, font=f_hint)
 
 f_kbd = font(14, bold=True)
 launch_step = "⌘ + Space  →  type \"AgentRunner\"  →  Enter"
 lsw = d.textbbox((0, 0), launch_step, font=f_kbd)[2]
-d.text(((W - lsw) / 2, H - 50), launch_step, fill=TEXT, font=f_kbd)
+kbd_y = hint_y - 26
+d.text(((W - lsw) / 2, kbd_y), launch_step, fill=TEXT, font=f_kbd)
 
-f_hint = font(10)
-hint = "Look for the pixel character in your menu bar (top-right)"
-hw = d.textbbox((0, 0), hint, font=f_hint)[2]
-d.text(((W - hw) / 2, H - 28), hint, fill=ACCENT, font=f_hint)
+f_launch = font(13)
+launch_title = "After install — open with Spotlight:"
+ltw = d.textbbox((0, 0), launch_title, font=f_launch)[2]
+d.text(((W - ltw) / 2, kbd_y - 22), launch_title, fill=TEXT, font=f_launch)
 
 img.save(OUT)
 print(f"DMG bg → {OUT} ({W}x{H})")
