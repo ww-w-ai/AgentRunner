@@ -159,106 +159,194 @@ struct SessionStateMachineTests {
     }
 }
 
-// MARK: - B. SessionManager regression tests (cumulative-bytes bug)
+// MARK: - B. SessionManager — flow ingestion correctness
 
-@Suite("B. SessionManager — nettop sampling correctness")
-struct SessionManagerBytesTests {
+@Suite("B. SessionManager — NetworkFlowEvent ingestion")
+struct SessionManagerFlowTests {
 
-    private static func makeManager() -> SessionManager {
+    /// Builds a SessionManager wired to a MockFlowSource so we can drive
+    /// deterministic event sequences without touching the kernel.
+    private static func makeManager() -> (SessionManager, MockFlowSource) {
         let registry = ProviderRegistry()
-        // Inject a known IP→provider mapping for test determinism
         registry.testInjectStaticMapping(["10.0.0.1": "Anthropic"])
-        return SessionManager(registry: registry)
+        let source = MockFlowSource()
+        let mgr = SessionManager(registry: registry, flowSource: source)
+        return (mgr, source)
     }
 
-    /// Build a NettopEvent pair (process header + connection row).
-    private static func feed(_ mgr: SessionManager,
-                             pid: Int32 = 100,
-                             name: String = "claude",
-                             cumIn: UInt64,
-                             cumOut: UInt64) {
-        mgr.handleInternal(.process(name: name, pid: pid))
-        mgr.handleInternal(.connection(
-            proto: "tcp4",
-            srcIP: "192.168.1.1", srcPort: 12345,
-            dstIP: "10.0.0.1", dstPort: 443,
-            state: "Established",
-            bytesIn: cumIn, bytesOut: cumOut))
+    private static func descriptor(flowID: UInt64,
+                                   pid: Int32 = 100,
+                                   name: String = "claude",
+                                   remoteHost: String = "10.0.0.1",
+                                   remotePort: UInt16 = 443,
+                                   srcPort: UInt16 = 12345) -> FlowDescriptor {
+        FlowDescriptor(
+            flowID: flowID,
+            pid: pid,
+            processName: name,
+            proto: IPPROTO_TCP,
+            local: SocketAddress(host: "192.168.1.1", port: srcPort),
+            remote: SocketAddress(host: remoteHost, port: remotePort)
+        )
     }
 
-    @Test("Same connection appearing twice in one tick window must NOT double-count cumulative bytes")
-    func duplicateSnapshotDoesNotInflate() {
-        let mgr = Self.makeManager()
-        // Two nettop snapshots within one tick window for the same connection
-        Self.feed(mgr, cumIn: 1_000, cumOut: 0)
-        Self.feed(mgr, cumIn: 1_500, cumOut: 0)  // cumulative grew to 1500
+    private static func started(_ d: FlowDescriptor, at t: Double) -> NetworkFlowEvent {
+        NetworkFlowEvent(kind: .flowStarted(d), timestamp: at(t))
+    }
+
+    private static func updated(flowID: UInt64, bIn: UInt64, bOut: UInt64,
+                                at t: Double) -> NetworkFlowEvent {
+        NetworkFlowEvent(kind: .flowUpdated(flowID: flowID,
+                                            bytesIn: bIn,
+                                            bytesOut: bOut),
+                         timestamp: at(t))
+    }
+
+    private static func ended(flowID: UInt64, at t: Double) -> NetworkFlowEvent {
+        NetworkFlowEvent(kind: .flowEnded(flowID: flowID), timestamp: at(t))
+    }
+
+    @Test("flowUpdated: cumulative bytes are recorded as max — not summed")
+    func cumulativeBytesNotSummed() {
+        let (mgr, _) = Self.makeManager()
+        let d = Self.descriptor(flowID: 1)
+        mgr.handleInternal(Self.started(d, at: 0))
+        mgr.handleInternal(Self.updated(flowID: 1, bIn: 1_000, bOut: 0, at: 0.5))
+        mgr.handleInternal(Self.updated(flowID: 1, bIn: 1_500, bOut: 0, at: 1.0))
         _ = mgr.runTick(now: at(3))
-
         let snap = mgr.sessionSnapshot()
         #expect(snap.count == 1)
-        // Bug: would store 2500 (1000+1500). Correct: 1500 (latest).
         #expect(snap.first?.bytesIn == 1_500,
-                "cumulative bytes from same connection must be max/latest, not summed")
+                "Latest cumulative — must not double up to 2500")
     }
 
-    @Test("Two snapshots then one snapshot — bytesInRate must not become 0 mid-stream")
-    func mixedSnapshotWindowsKeepRateAlive() {
-        let mgr = Self.makeManager()
-        // Tick 1: 2 snapshots (cum 1000, 1500)
-        Self.feed(mgr, cumIn: 1_000, cumOut: 0)
-        Self.feed(mgr, cumIn: 1_500, cumOut: 0)
-        _ = mgr.runTick(now: at(3))
-
-        // Tick 2: 1 snapshot at cum 2000 — traffic still flowing (+500/3s ≈ 167 B/s)
-        Self.feed(mgr, cumIn: 2_000, cumOut: 0)
-        _ = mgr.runTick(now: at(6))
-
-        let snap = mgr.sessionSnapshot()
-        // With buggy summation: tick1 stored bytesIn=2500. tick2 sees max(2500, 2000)=2500.
-        // dIn = 0 → bytesInRate = 0. WRONG.
-        // With fix: tick1=1500, tick2=2000, dIn=500, rate≈167 B/s.
-        #expect(snap.first?.bytesInRate ?? 0 > 0,
-                "Live traffic must not yield bytesInRate=0 due to cumulative summation")
-    }
-
-    @Test("Multiple connections to same provider in one tick are summed correctly")
-    func multipleConnectionsSummed() {
-        let mgr = Self.makeManager()
-        mgr.handleInternal(.process(name: "claude", pid: 100))
-        // Connection A
-        mgr.handleInternal(.connection(
-            proto: "tcp4",
-            srcIP: "192.168.1.1", srcPort: 1111,
-            dstIP: "10.0.0.1", dstPort: 443,
-            state: "Established",
-            bytesIn: 1_000, bytesOut: 0))
-        // Connection B (different src port — distinct connection, same provider)
-        mgr.handleInternal(.connection(
-            proto: "tcp4",
-            srcIP: "192.168.1.1", srcPort: 2222,
-            dstIP: "10.0.0.1", dstPort: 443,
-            state: "Established",
-            bytesIn: 500, bytesOut: 0))
+    @Test("Multiple flows to the same provider sum bytes for the session")
+    func multipleFlowsSumPerSession() {
+        let (mgr, _) = Self.makeManager()
+        let a = Self.descriptor(flowID: 1, srcPort: 1111)
+        let b = Self.descriptor(flowID: 2, srcPort: 2222)
+        mgr.handleInternal(Self.started(a, at: 0))
+        mgr.handleInternal(Self.started(b, at: 0))
+        mgr.handleInternal(Self.updated(flowID: 1, bIn: 1_000, bOut: 0, at: 0.5))
+        mgr.handleInternal(Self.updated(flowID: 2, bIn: 500, bOut: 0, at: 0.5))
         _ = mgr.runTick(now: at(3))
         let snap = mgr.sessionSnapshot()
-        #expect(snap.first?.bytesIn == 1_500,
-                "distinct connections in same snapshot must sum")
+        #expect(snap.count == 1, "both flows roll up to one (PID, provider) Session")
+        #expect(snap.first?.bytesIn == 1_500)
     }
 
-    @Test("nettop counter reset (cumulative shrinks) does not bury session in stale max")
-    func nettopResetGuard() {
-        let mgr = Self.makeManager()
-        Self.feed(mgr, cumIn: 10_000, cumOut: 0)
+    @Test("Cumulative growth across ticks produces a non-zero rate")
+    func ratePersistsAcrossTicks() {
+        let (mgr, _) = Self.makeManager()
+        let d = Self.descriptor(flowID: 1)
+        mgr.handleInternal(Self.started(d, at: 0))
+        mgr.handleInternal(Self.updated(flowID: 1, bIn: 1_500, bOut: 0, at: 1))
         _ = mgr.runTick(now: at(3))
-        // Counter resets (e.g., nettop relaunch) — cumulative drops to 100
-        Self.feed(mgr, cumIn: 100, cumOut: 0)
+
+        mgr.handleInternal(Self.updated(flowID: 1, bIn: 2_000, bOut: 0, at: 4))
         _ = mgr.runTick(now: at(6))
         let snap = mgr.sessionSnapshot()
-        // max() guard ensures stored bytesIn stays at 10000 (no underflow).
-        // delta = 0, rate = 0 — acceptable (no false negative).
-        #expect(snap.first?.bytesIn ?? 0 >= 10_000)
-        #expect(snap.first?.bytesInRate ?? -1 >= 0, "rate must never be negative")
+        #expect((snap.first?.bytesInRate ?? 0) > 0,
+                "Continued cumulative growth must yield a positive rate")
     }
+
+    @Test("Blocked process names never produce a Session")
+    func blocklistFiltersFlows() {
+        let (mgr, _) = Self.makeManager()
+        let blocked = Self.descriptor(flowID: 1, name: "Google Chrome")
+        mgr.handleInternal(Self.started(blocked, at: 0))
+        mgr.handleInternal(Self.updated(flowID: 1, bIn: 50_000, bOut: 0, at: 1))
+        _ = mgr.runTick(now: at(3))
+        #expect(mgr.sessionSnapshot().isEmpty,
+                "Blocklist must short-circuit before Session creation")
+    }
+
+    @Test("Flows whose remote IP doesn't match any provider are dropped")
+    func unknownRemoteIPDropped() {
+        let (mgr, _) = Self.makeManager()
+        let d = Self.descriptor(flowID: 1, remoteHost: "1.2.3.4")
+        mgr.handleInternal(Self.started(d, at: 0))
+        mgr.handleInternal(Self.updated(flowID: 1, bIn: 50_000, bOut: 0, at: 1))
+        _ = mgr.runTick(now: at(3))
+        #expect(mgr.sessionSnapshot().isEmpty)
+    }
+
+    @Test("Updates arriving for a never-started flow are dropped")
+    func updateWithoutStartIgnored() {
+        let (mgr, _) = Self.makeManager()
+        // No flowStarted — descriptor was never registered.
+        mgr.handleInternal(Self.updated(flowID: 99, bIn: 1_000, bOut: 0, at: 1))
+        _ = mgr.runTick(now: at(3))
+        #expect(mgr.sessionSnapshot().isEmpty)
+    }
+
+    @Test("flowEnded removes the flow from the live map")
+    func flowEndedRemovesSlot() {
+        let (mgr, _) = Self.makeManager()
+        let d = Self.descriptor(flowID: 1)
+        mgr.handleInternal(Self.started(d, at: 0))
+        mgr.handleInternal(Self.updated(flowID: 1, bIn: 1_500, bOut: 0, at: 0.5))
+        mgr.handleInternal(Self.ended(flowID: 1, at: 1))
+        // No further updates — Session retains historical bytes but new
+        // updates for this flowID would be ignored.
+        mgr.handleInternal(Self.updated(flowID: 1, bIn: 9_999, bOut: 0, at: 2))
+        _ = mgr.runTick(now: at(3))
+        let snap = mgr.sessionSnapshot()
+        // The Session may exist with the bytes captured before flowEnded,
+        // but the post-end update must NOT have been ingested.
+        if let s = snap.first {
+            #expect(s.bytesIn <= 1_500,
+                    "Update after flowEnded must not be ingested")
+        }
+    }
+}
+
+// MARK: - B'. MockFlowSource sanity
+
+@Suite("B'. MockFlowSource")
+struct MockFlowSourceTests {
+
+    @Test("emit before start does nothing")
+    func emitWithoutStartNoop() {
+        let m = MockFlowSource()
+        m.emit(NetworkFlowEvent(
+            kind: .flowEnded(flowID: 0),
+            timestamp: Date()))
+        // No crash, no observable side effect.
+    }
+
+    @Test("startError causes start() to throw")
+    func startErrorThrows() {
+        let m = MockFlowSource()
+        m.startError = .kernelControlUnavailable(errno: 1)
+        var threw = false
+        do {
+            try m.start(eventHandler: { _ in }, failureHandler: { _ in })
+        } catch {
+            threw = true
+        }
+        #expect(threw)
+    }
+
+    @Test("fail() invokes failureHandler exactly once")
+    func failInvokesHandler() {
+        let m = MockFlowSource()
+        let counter = FailCounter()
+        try? m.start(eventHandler: { _ in },
+                     failureHandler: { _ in counter.bump() })
+        m.fail(NetworkFlowSourceError.sourceClosed)
+        m.fail(NetworkFlowSourceError.sourceClosed)
+        #expect(counter.value == 1, "post-fail re-fail must not re-invoke")
+    }
+}
+
+/// Reference-typed counter — keeps the closure's mutation off `inout` /
+/// captured-var semantics that Swift 6 strict concurrency rejects.
+private final class FailCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _value = 0
+    func bump() { lock.lock(); _value += 1; lock.unlock() }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return _value }
 }
 
 // MARK: - C. CharacterAnimator
