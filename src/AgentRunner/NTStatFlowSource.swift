@@ -55,6 +55,9 @@ final class NTStatFlowSource: NetworkFlowSource {
     private var failureHandler: (@Sendable (Error) -> Void)?
     private var contextCounter: UInt64 = 1
     private var isShuttingDown = false
+    /// Reusable receive buffer — allocated once per source lifecycle to
+    /// avoid per-drain heap churn. ntstat datagrams are well under 64 KB.
+    private var rxBuffer: UnsafeMutableRawPointer?
 
     /// Tracks which srcref values we've already reported as `flowStarted`
     /// so a periodic UPDATE doesn't re-emit the start event. Map value
@@ -68,6 +71,7 @@ final class NTStatFlowSource: NetworkFlowSource {
 
     deinit {
         if fd >= 0 { Darwin.close(fd) }
+        rxBuffer?.deallocate()
     }
 
     // MARK: - NetworkFlowSource
@@ -144,7 +148,11 @@ final class NTStatFlowSource: NetworkFlowSource {
         }
         fd = s
 
-        // 4. Subscribe TCP_USERLAND + UDP_USERLAND.
+        // 4. Allocate the lifecycle-scoped receive buffer.
+        rxBuffer = UnsafeMutableRawPointer.allocate(
+            byteCount: NTSTAT_READ_BUFFER_SIZE, alignment: 8)
+
+        // 5. Subscribe TCP_USERLAND + UDP_USERLAND.
         try subscribeLocked(provider: .tcpUserland)
         try subscribeLocked(provider: .udpUserland)
 
@@ -172,6 +180,7 @@ final class NTStatFlowSource: NetworkFlowSource {
         updateTimer?.cancel(); updateTimer = nil
         readSource?.cancel(); readSource = nil
         if fd >= 0 { Darwin.close(fd); fd = -1 }
+        rxBuffer?.deallocate(); rxBuffer = nil
         eventHandler = nil
         failureHandler = nil
         startedFlows.removeAll(keepingCapacity: false)
@@ -246,12 +255,9 @@ final class NTStatFlowSource: NetworkFlowSource {
     // MARK: - Read / decode
 
     private func drainSocket() {
-        guard fd >= 0 else { return }
-        let buffer = UnsafeMutableRawPointer.allocate(
-            byteCount: NTSTAT_READ_BUFFER_SIZE, alignment: 8)
-        defer { buffer.deallocate() }
-
-        // Drain everything that's currently readable.
+        guard fd >= 0, let buffer = rxBuffer else { return }
+        // SOCK_DGRAM gives one ntstat datagram per recv. Drain until
+        // the kernel queue is empty.
         readLoop: while true {
             let n = Darwin.recv(fd, buffer, NTSTAT_READ_BUFFER_SIZE, MSG_DONTWAIT)
             if n <= 0 {
@@ -307,25 +313,25 @@ final class NTStatFlowSource: NetworkFlowSource {
     private func handleSrcAdded(_ p: UnsafeRawPointer, length: Int) {
         // With useUpdateForAdd in the filter mask the kernel sends
         // SRC_UPDATE instead — but tolerate both shapes.
-        guard length >= MemoryLayout<nstat_msg_src_added_wire>.size else { return }
-        let added = p.assumingMemoryBound(to: nstat_msg_src_added_wire.self).pointee
+        guard length >= 24 else { return }   // hdr(16) + srcref(8)
+        let srcref = p.load(fromByteOffset: 16, as: UInt64.self)
         // Without a descriptor we can't classify the flow yet. Request one.
         var req = nstat_msg_query_src()
         req.hdr.context = nextContext()
         req.hdr.type = NStatMsgType.getSrcDesc.rawValue
         req.hdr.length = UInt16(MemoryLayout<nstat_msg_query_src>.size)
         req.hdr.flags = 0
-        req.srcref = added.srcref
+        req.srcref = srcref
         _ = withUnsafeBytes(of: &req) { buf in
             Darwin.send(fd, buf.baseAddress, buf.count, 0)
         }
     }
 
     private func handleSrcRemoved(_ p: UnsafeRawPointer, length: Int) {
-        guard length >= MemoryLayout<nstat_msg_src_removed_wire>.size else { return }
-        let removed = p.assumingMemoryBound(to: nstat_msg_src_removed_wire.self).pointee
-        if startedFlows.remove(removed.srcref) != nil {
-            emit(.flowEnded(flowID: removed.srcref))
+        guard length >= 24 else { return }   // hdr(16) + srcref(8)
+        let srcref = p.load(fromByteOffset: 16, as: UInt64.self)
+        if startedFlows.remove(srcref) != nil {
+            emit(.flowEnded(flowID: srcref))
         }
     }
 
@@ -334,7 +340,9 @@ final class NTStatFlowSource: NetworkFlowSource {
         // reserved[4] + data[].
         guard length >= NSTAT_UPDATE_HEADER_SIZE else { return }
         let srcref = p.load(fromByteOffset: 16, as: UInt64.self)
-        let counts = readCounts(p, offset: 32)
+        // counts.rxbytes / txbytes — second and fourth u64 inside counts.
+        let rxbytes = p.load(fromByteOffset: 32 + 8, as: UInt64.self)
+        let txbytes = p.load(fromByteOffset: 32 + 24, as: UInt64.self)
         let provider = p.load(fromByteOffset: 144, as: UInt32.self)
 
         let descBase = NSTAT_UPDATE_HEADER_SIZE
@@ -348,19 +356,18 @@ final class NTStatFlowSource: NetworkFlowSource {
             }
         }
         if startedFlows.contains(srcref) {
-            emit(.flowUpdated(flowID: srcref,
-                              bytesIn: counts.rxbytes,
-                              bytesOut: counts.txbytes))
+            emit(.flowUpdated(flowID: srcref, bytesIn: rxbytes, bytesOut: txbytes))
         }
     }
 
     private func handleSrcCounts(_ p: UnsafeRawPointer, length: Int) {
-        guard length >= MemoryLayout<nstat_msg_src_counts_wire>.size else { return }
-        let m = p.assumingMemoryBound(to: nstat_msg_src_counts_wire.self).pointee
-        guard startedFlows.contains(m.srcref) else { return }
-        emit(.flowUpdated(flowID: m.srcref,
-                          bytesIn: m.counts.rxbytes,
-                          bytesOut: m.counts.txbytes))
+        guard length >= 144 else { return }   // hdr(16) + srcref(8) + event_flags(8) + counts(112)
+        let srcref = p.load(fromByteOffset: 16, as: UInt64.self)
+        guard startedFlows.contains(srcref) else { return }
+        // counts begins at offset 32; rxbytes is the second u64 in counts.
+        let rxbytes = p.load(fromByteOffset: 32 + 8, as: UInt64.self)
+        let txbytes = p.load(fromByteOffset: 32 + 24, as: UInt64.self)
+        emit(.flowUpdated(flowID: srcref, bytesIn: rxbytes, bytesOut: txbytes))
     }
 
     private func handleSrcDesc(_ p: UnsafeRawPointer, length: Int) {
@@ -380,10 +387,6 @@ final class NTStatFlowSource: NetworkFlowSource {
     }
 
     // MARK: - Decoding helpers
-
-    private func readCounts(_ p: UnsafeRawPointer, offset: Int) -> nstat_counts {
-        return p.load(fromByteOffset: offset, as: nstat_counts.self)
-    }
 
     /// Build a FlowDescriptor from a provider-specific descriptor blob.
     /// Only TCP/UDP USERLAND providers are supported — others are dropped.

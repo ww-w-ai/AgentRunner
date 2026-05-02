@@ -132,51 +132,25 @@ struct nstat_msg_query_src {
     var hdr: nstat_msg_hdr = nstat_msg_hdr()
     var srcref: UInt64 = 0
 }
-// 24 bytes — used for both QUERY_SRC and GET_UPDATE shapes that take a srcref.
+// 24 bytes — used for QUERY_SRC, GET_UPDATE, GET_SRC_DESC requests.
 
-struct nstat_msg_src_added_wire {
-    var hdr: nstat_msg_hdr = nstat_msg_hdr()
-    var srcref: UInt64 = 0
-    var provider: UInt32 = 0
-    var reserved: UInt32 = 0   // u_int8_t reserved[4]
-}
-// 32 bytes
-
-struct nstat_msg_src_removed_wire {
-    var hdr: nstat_msg_hdr = nstat_msg_hdr()
-    var srcref: UInt64 = 0
-}
-// 24 bytes
-
-struct nstat_counts {
-    var rxpackets: UInt64
-    var rxbytes: UInt64
-    var txpackets: UInt64
-    var txbytes: UInt64
-    var cell_rxbytes: UInt64
-    var cell_txbytes: UInt64
-    var wifi_rxbytes: UInt64
-    var wifi_txbytes: UInt64
-    var wired_rxbytes: UInt64
-    var wired_txbytes: UInt64
-    var rxduplicatebytes: UInt32
-    var rxoutoforderbytes: UInt32
-    var txretransmit: UInt32
-    var connectattempts: UInt32
-    var connectsuccesses: UInt32
-    var min_rtt: UInt32
-    var avg_rtt: UInt32
-    var var_rtt: UInt32
-}
-// 112 bytes
-
-struct nstat_msg_src_counts_wire {
-    var hdr: nstat_msg_hdr
-    var srcref: UInt64
-    var event_flags: UInt64
-    var counts: nstat_counts
-}
-// 16 + 8 + 8 + 112 = 144 bytes
+// Inbound (kernel→userland) message layouts are not modeled as Swift
+// structs. NTStatFlowSource reads only the specific fields it needs
+// out of the receive buffer using `load(fromByteOffset:as:)`. This is
+// alignment-safe regardless of where the message lands in the buffer
+// and stays robust across xnu versions that may append fields.
+//
+// Reference layouts (hdr always at offset 0):
+//   SRC_ADDED:    hdr | srcref(u64@16) | provider(u32@24) | reserved[4]
+//   SRC_REMOVED:  hdr | srcref(u64@16)
+//   SRC_COUNTS:   hdr | srcref(u64@16) | event_flags(u64@24) | counts(@32)
+//   SRC_UPDATE:   hdr | srcref(u64@16) | event_flags(u64@24) | counts(@32) |
+//                 provider(u32@144)    | reserved[4]@148    | data[]@152
+//
+// nstat_counts (112 bytes, starts at offset 32 in COUNTS/UPDATE):
+//   rxpackets(u64@0) rxbytes(u64@8) txpackets(u64@16) txbytes(u64@24)
+//   ... + 6 per-interface u64 + 8 misc u32 fields
+// We touch only rxbytes and txbytes — see NTStatFlowSource.
 
 // nstat_msg_src_update is variable-length:
 //   hdr (16) + srcref (8) + event_flags (8) + counts (112) + provider (4) +
