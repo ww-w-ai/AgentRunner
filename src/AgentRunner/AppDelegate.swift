@@ -13,9 +13,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var animator: CharacterAnimator!
     private var popover: SessionPopover!
     private let menu = NSMenu()
-    private let nettop = NettopMonitor()
     private let registry = ProviderRegistry()
-    private lazy var sessions = SessionManager(registry: registry)
+    private let flowSource: NetworkFlowSource = NTStatFlowSource(filter: .external)
+    private lazy var sessions = SessionManager(registry: registry, flowSource: flowSource)
+    private var monitorAvailable = true
 
     // 동적 업데이트 메뉴 항목 (텍스트가 상태에 따라 바뀜)
     private var updateStatusItem: NSMenuItem!
@@ -57,14 +58,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sessions.onAggregateChange = { [weak self] agg in
             self?.animator.render(agg)
         }
-        sessions.start()
-
-        nettop.onEvent = { [weak self] event in
-            self?.sessions.handle(event: event)
+        sessions.onSourceFailure = { [weak self] error in
+            self?.handleMonitorUnavailable(error: error)
         }
-        nettop.start()
-
-        NSLog("AgentRunner: launched")
+        do {
+            try sessions.start()
+            NSLog("AgentRunner: launched")
+        } catch {
+            handleMonitorUnavailable(error: error)
+        }
 
         // 업데이트 체크는 메뉴 열 때만 — 메뉴 안 열면 결과 볼 곳도 없음.
 
@@ -107,10 +109,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        nettop.stop()
         sessions.stop()
         registry.stop()
         animator?.stop()
+    }
+
+    /// Called when ntstat init fails or the kernel control socket dies
+    /// after start. The character stops animating, the menu surfaces a
+    /// non-actionable status row, and we log enough detail for the user
+    /// to file an issue. No retry — see design spec §6.
+    private func handleMonitorUnavailable(error: Error) {
+        guard monitorAvailable else { return }
+        monitorAvailable = false
+        NSLog("AgentRunner: monitor unavailable — \(error)")
+        animator?.stop()
+        animator?.renderInitial()
     }
 
     private func setupStatusItem() {
@@ -423,15 +436,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func receiveSleep(_ notification: Notification) {
         NSLog("AgentRunner: system sleep, suspending")
         animator?.stop()
-        nettop.stop()
         sessions.stop()
     }
 
     @objc private func receiveWake(_ notification: Notification) {
         NSLog("AgentRunner: system wake, resuming")
         registry.refresh()
-        sessions.start()
-        nettop.start()
-        animator.renderInitial()
+        do {
+            try sessions.start()
+            monitorAvailable = true
+            animator.renderInitial()
+        } catch {
+            handleMonitorUnavailable(error: error)
+        }
     }
 }
