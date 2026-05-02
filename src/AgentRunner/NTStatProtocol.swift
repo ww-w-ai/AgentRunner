@@ -204,14 +204,16 @@ func parseSockaddrUnion(_ data: UnsafeRawPointer, offset: Int, totalLength: Int)
     switch family {
     case AF_INET:
         guard offset + 8 <= totalLength else { return nil }
-        // sin_port at offset 2 (network byte order); sin_addr at offset 4
+        // sin_port at offset 2 (network byte order); sin_addr at offset 4.
+        // Build the dotted-quad directly. Earlier this called inet_ntop
+        // via `withUnsafePointer(to: &addrBytes)` where addrBytes was a
+        // Swift Array — that hands inet_ntop a pointer to the Array
+        // STRUCT (buffer pointer + count metadata), not the 4 IP bytes.
+        // Result was nondeterministic garbage IPs that never matched
+        // ProviderRegistry. The IPv6 path below uses the correct
+        // `withUnsafeBufferPointer { buf in ... buf.baseAddress }` form.
         let port = UInt16(bytes[2]) << 8 | UInt16(bytes[3])
-        var addrBytes = [bytes[4], bytes[5], bytes[6], bytes[7]]
-        let host = withUnsafePointer(to: &addrBytes) { ptr -> String in
-            var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-            _ = inet_ntop(AF_INET, ptr, &buf, socklen_t(INET_ADDRSTRLEN))
-            return String(cString: buf)
-        }
+        let host = "\(bytes[4]).\(bytes[5]).\(bytes[6]).\(bytes[7])"
         return SocketAddress(host: host, port: port)
     case AF_INET6:
         guard offset + 28 <= totalLength else { return nil }
@@ -219,6 +221,22 @@ func parseSockaddrUnion(_ data: UnsafeRawPointer, offset: Int, totalLength: Int)
         let port = UInt16(bytes[2]) << 8 | UInt16(bytes[3])
         var addrBytes = [UInt8](repeating: 0, count: 16)
         for i in 0..<16 { addrBytes[i] = bytes[8 + i] }
+        // IPv4-mapped IPv6 normalization (`::ffff:1.2.3.4` → `1.2.3.4`).
+        // Empirically, the macOS kernel stores the actual transport
+        // family in ntstat descriptors — IPv4 transports show up as
+        // AF_INET, not AF_INET6 with a mapped address. Mapped form is
+        // a userspace socket-API abstraction. So this code path is
+        // currently dead. Kept commented as a marker in case a future
+        // xnu starts surfacing the mapped form to ntstat clients;
+        // uncomment if we ever observe `::ffff:` prefixes in unmatched
+        // flow logs.
+        //
+        // let isV4Mapped = addrBytes.prefix(10).allSatisfy { $0 == 0 } &&
+        //                  addrBytes[10] == 0xFF && addrBytes[11] == 0xFF
+        // if isV4Mapped {
+        //     let host = "\(addrBytes[12]).\(addrBytes[13]).\(addrBytes[14]).\(addrBytes[15])"
+        //     return SocketAddress(host: host, port: port)
+        // }
         let host = addrBytes.withUnsafeBufferPointer { buf -> String in
             var s = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
             _ = inet_ntop(AF_INET6, buf.baseAddress, &s, socklen_t(INET6_ADDRSTRLEN))

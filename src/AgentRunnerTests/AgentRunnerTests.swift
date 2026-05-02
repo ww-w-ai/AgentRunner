@@ -387,3 +387,137 @@ struct CharacterAnimatorTests {
         #expect(!CharacterAnimator.AnimID.run.isOneShot)
     }
 }
+
+// MARK: - D. ntstat sockaddr parser regression tests
+//
+// History: parseSockaddrUnion's AF_INET branch once called inet_ntop
+// via `withUnsafePointer(to: &addrBytes)` where addrBytes was a Swift
+// Array. That handed inet_ntop a pointer to the Array struct header
+// (buffer pointer + count metadata) instead of the 4 IP bytes,
+// producing nondeterministic garbage IPs that never matched
+// ProviderRegistry. The character stayed lying down forever.
+//
+// These tests pin the dotted-quad behavior so the bug can't recur.
+
+@Suite("D. NTStat sockaddr parser")
+struct SockaddrParserTests {
+
+    /// Build a sockaddr_in starting at byte 0 of a buffer with optional
+    /// leading padding. Returns the buffer + offset for the parser.
+    private static func makeIPv4Buffer(
+        leading: Int = 0,
+        addr: (UInt8, UInt8, UInt8, UInt8),
+        port: UInt16
+    ) -> (Data, Int) {
+        var data = Data(count: leading)
+        data.append(0x10)               // sin_len = 16
+        data.append(2)                  // sin_family = AF_INET (2)
+        data.append(UInt8(port >> 8))   // sin_port hi
+        data.append(UInt8(port & 0xff)) // sin_port lo
+        data.append(addr.0)
+        data.append(addr.1)
+        data.append(addr.2)
+        data.append(addr.3)
+        for _ in 0..<8 { data.append(0) } // sin_zero[8]
+        // Padding to fill the 28-byte union slot
+        for _ in 0..<12 { data.append(0) }
+        return (data, leading)
+    }
+
+    private static func makeIPv6Buffer(
+        leading: Int = 0,
+        addr: [UInt8],
+        port: UInt16
+    ) -> (Data, Int) {
+        precondition(addr.count == 16)
+        var data = Data(count: leading)
+        data.append(0x1c)               // sin6_len = 28
+        data.append(30)                 // sin6_family = AF_INET6 (30)
+        data.append(UInt8(port >> 8))
+        data.append(UInt8(port & 0xff))
+        for _ in 0..<4 { data.append(0) } // sin6_flowinfo
+        data.append(contentsOf: addr)
+        for _ in 0..<4 { data.append(0) } // sin6_scope_id
+        return (data, leading)
+    }
+
+    @Test("AF_INET: dotted quad (regression: don't pass Array to inet_ntop)")
+    func ipv4DottedQuad() {
+        let (data, offset) = Self.makeIPv4Buffer(
+            addr: (160, 79, 104, 10), port: 443)
+        data.withUnsafeBytes { raw in
+            let parsed = parseSockaddrUnion(raw.baseAddress!,
+                                            offset: offset,
+                                            totalLength: data.count)
+            #expect(parsed?.host == "160.79.104.10",
+                    "AF_INET parser must produce canonical dotted-quad")
+            #expect(parsed?.port == 443)
+        }
+    }
+
+    @Test("AF_INET: parser produces deterministic strings on repeat")
+    func ipv4Deterministic() {
+        // Original bug surfaced as different garbage IPs across calls
+        // because Array struct memory shifted. Make sure same input
+        // yields same output.
+        let (data, offset) = Self.makeIPv4Buffer(
+            addr: (1, 2, 3, 4), port: 80)
+        var seen: Set<String> = []
+        for _ in 0..<10 {
+            data.withUnsafeBytes { raw in
+                if let p = parseSockaddrUnion(raw.baseAddress!,
+                                              offset: offset,
+                                              totalLength: data.count) {
+                    seen.insert(p.host)
+                }
+            }
+        }
+        #expect(seen == ["1.2.3.4"],
+                "AF_INET parse must be deterministic — got \(seen)")
+    }
+
+    @Test("AF_INET: works at non-zero descriptor offsets (real layouts)")
+    func ipv4AtTCPRemoteOffset() {
+        // TCP descriptor places `remote` union at offset 152.
+        let (data, offset) = Self.makeIPv4Buffer(
+            leading: 152, addr: (34, 149, 66, 137), port: 443)
+        data.withUnsafeBytes { raw in
+            let parsed = parseSockaddrUnion(raw.baseAddress!,
+                                            offset: offset,
+                                            totalLength: data.count)
+            #expect(parsed?.host == "34.149.66.137")
+        }
+    }
+
+    @Test("AF_INET6: canonical compressed form")
+    func ipv6Canonical() {
+        // 2607:6bc0::10 = bytes 26 07 6b c0 followed by zeros, then 0010
+        let addrBytes: [UInt8] = [
+            0x26, 0x07, 0x6b, 0xc0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0x00, 0x10,
+        ]
+        let (data, offset) = Self.makeIPv6Buffer(
+            addr: addrBytes, port: 443)
+        data.withUnsafeBytes { raw in
+            let parsed = parseSockaddrUnion(raw.baseAddress!,
+                                            offset: offset,
+                                            totalLength: data.count)
+            #expect(parsed?.host == "2607:6bc0::10")
+            #expect(parsed?.port == 443)
+        }
+    }
+
+    @Test("Unknown family returns nil")
+    func unknownFamilyReturnsNil() {
+        var data = Data([0x10, 0xFF /* unknown family */, 0, 0,
+                         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        for _ in 0..<12 { data.append(0) }
+        data.withUnsafeBytes { raw in
+            let parsed = parseSockaddrUnion(raw.baseAddress!,
+                                            offset: 0,
+                                            totalLength: data.count)
+            #expect(parsed == nil)
+        }
+    }
+}

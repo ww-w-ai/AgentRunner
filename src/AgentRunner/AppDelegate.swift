@@ -14,7 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var popover: SessionPopover!
     private let menu = NSMenu()
     private let registry = ProviderRegistry()
-    private let flowSource: NetworkFlowSource = NTStatFlowSource(filter: .external)
+    private let flowSource: NetworkFlowSource = NTStatFlowSource()
     private lazy var sessions = SessionManager(registry: registry, flowSource: flowSource)
     private var monitorAvailable = true
 

@@ -37,6 +37,23 @@ final class SessionManager: @unchecked Sendable {
     }
     private var liveFlows: [UInt64: FlowSlot] = [:]
 
+    /// Flows whose process passes the blocklist but whose remote IP
+    /// wasn't yet in `ProviderRegistry` at flowStarted time. Held so a
+    /// later registry refresh (10-min cycle, NWPathMonitor, system
+    /// wake) can rescue them. Without this, a flow opened before its
+    /// host's DNS lookup completes is permanently invisible — the
+    /// regression that v1.0.11's IP-accumulation fix addressed under
+    /// the old nettop pipeline. Aged out after `pendingMaxAge` so we
+    /// don't grow unbounded on a busy machine.
+    private struct PendingFlow {
+        let descriptor: FlowDescriptor
+        let firstSeen: Date
+        var lastBytesIn: UInt64
+        var lastBytesOut: UInt64
+    }
+    private var pendingFlows: [UInt64: PendingFlow] = [:]
+    private let pendingMaxAge: TimeInterval = 5 * 60
+
     private let queue = DispatchQueue(label: "ai.ww-w.AgentRunner.session")
     private var tickTimer: DispatchSourceTimer?
 
@@ -107,37 +124,81 @@ final class SessionManager: @unchecked Sendable {
     internal func handleInternal(_ event: NetworkFlowEvent) {
         switch event.kind {
         case .flowStarted(let desc):
-            ingestStart(desc)
+            ingestStart(desc, at: event.timestamp)
         case .flowUpdated(let id, let bIn, let bOut):
             ingestUpdate(flowID: id, bytesIn: bIn, bytesOut: bOut)
         case .flowEnded(let id):
             liveFlows.removeValue(forKey: id)
+            pendingFlows.removeValue(forKey: id)
         }
     }
 
-    private func ingestStart(_ desc: FlowDescriptor) {
+    private func ingestStart(_ desc: FlowDescriptor, at now: Date) {
         // Layer 1: blocklist (browsers / chat clients that hit LLM IPs
         // but aren't AI agents themselves).
         if Blocklist.isBlocked(desc.processName) { return }
         // Layer 2: provider classification by remote IP.
-        guard let provider = registry.providerName(forIP: desc.remote.host) else {
-            return
+        if let provider = registry.providerName(forIP: desc.remote.host) {
+            liveFlows[desc.flowID] = FlowSlot(
+                session: SessionKey(pid: desc.pid, provider: provider),
+                processName: desc.processName,
+                bytesIn: 0,
+                bytesOut: 0
+            )
+        } else {
+            // No match yet — defer in case the registry catches up
+            // (DNS refresh, network change, system wake). Re-evaluated
+            // on each tick. Critical because ntstat emits SRC_DESC for
+            // existing flows the moment we subscribe — typically a few
+            // seconds before ProviderRegistry's first DNS refresh
+            // completes.
+            pendingFlows[desc.flowID] = PendingFlow(
+                descriptor: desc,
+                firstSeen: now,
+                lastBytesIn: 0,
+                lastBytesOut: 0
+            )
         }
-        let session = SessionKey(pid: desc.pid, provider: provider)
-        liveFlows[desc.flowID] = FlowSlot(
-            session: session,
-            processName: desc.processName,
-            bytesIn: 0,
-            bytesOut: 0
-        )
     }
 
     private func ingestUpdate(flowID: UInt64, bytesIn: UInt64, bytesOut: UInt64) {
-        guard var slot = liveFlows[flowID] else { return }
-        // Cumulative counters: monotonically grow within a flow lifetime.
-        slot.bytesIn = max(slot.bytesIn, bytesIn)
-        slot.bytesOut = max(slot.bytesOut, bytesOut)
-        liveFlows[flowID] = slot
+        // Fast path: already-classified flow.
+        if var slot = liveFlows[flowID] {
+            slot.bytesIn = max(slot.bytesIn, bytesIn)
+            slot.bytesOut = max(slot.bytesOut, bytesOut)
+            liveFlows[flowID] = slot
+            return
+        }
+        // Pending path: keep latest counters so promotion later carries
+        // accurate cumulative totals.
+        if var pending = pendingFlows[flowID] {
+            pending.lastBytesIn = max(pending.lastBytesIn, bytesIn)
+            pending.lastBytesOut = max(pending.lastBytesOut, bytesOut)
+            pendingFlows[flowID] = pending
+        }
+    }
+
+    /// Called from runTick. Re-tests every pending flow against the
+    /// (possibly updated) ProviderRegistry. Promotes matches to
+    /// liveFlows. Drops entries older than `pendingMaxAge`.
+    private func reclassifyPending(now: Date) {
+        var promotedKeys: [UInt64] = []
+        var staleKeys: [UInt64] = []
+        for (id, p) in pendingFlows {
+            if let provider = registry.providerName(forIP: p.descriptor.remote.host) {
+                liveFlows[id] = FlowSlot(
+                    session: SessionKey(pid: p.descriptor.pid, provider: provider),
+                    processName: p.descriptor.processName,
+                    bytesIn: p.lastBytesIn,
+                    bytesOut: p.lastBytesOut
+                )
+                promotedKeys.append(id)
+            } else if now.timeIntervalSince(p.firstSeen) > pendingMaxAge {
+                staleKeys.append(id)
+            }
+        }
+        for k in promotedKeys { pendingFlows.removeValue(forKey: k) }
+        for k in staleKeys    { pendingFlows.removeValue(forKey: k) }
     }
 
     // MARK: - Tick (publish + GC)
@@ -146,6 +207,10 @@ final class SessionManager: @unchecked Sendable {
     /// Sessions, runs the state machine, returns the new aggregate.
     @discardableResult
     internal func runTick(now: Date) -> AggregateState {
+        // 0. Pending → live promotion sweep. Catches flows whose remote
+        //    IP only became registry-known after flowStarted fired.
+        reclassifyPending(now: now)
+
         // 1. Flow → session aggregation. A single (PID, provider) pair
         //    can have multiple concurrent flows (parallel HTTP/2 streams,
         //    OpenAI's separate conn for tool calls, etc.).

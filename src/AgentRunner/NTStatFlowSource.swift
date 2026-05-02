@@ -8,10 +8,10 @@
 //
 //  Lifecycle
 //  ---------
-//  start() opens a socket to com.apple.network.statistics, sends two
-//  ADD_ALL_SRCS subscriptions (TCP_USERLAND + UDP_USERLAND), and arms a
-//  DispatchSourceRead. A background read source drains messages and a
-//  periodic timer emits GET_UPDATE to refresh byte counters.
+//  start() opens a socket to com.apple.network.statistics, sends four
+//  ADD_ALL_SRCS subscriptions (TCP/UDP × KERNEL/USERLAND), arms a
+//  DispatchSourceRead, and starts a 2-second timer that polls the
+//  kernel for byte counters via a single GET_UPDATE request.
 //
 //  stop() is idempotent. After stop() the source can be re-started
 //  (sleep/wake support) — internal state is reset on every start().
@@ -20,31 +20,25 @@
 import Darwin
 import Foundation
 
-/// Sized to hold a few ntstat messages worth of bytes. Kernel
-/// SRC_UPDATE for TCP_USERLAND can run ~500 bytes.
+/// Sized to hold a few ntstat messages worth of bytes. A typical
+/// SRC_UPDATE for TCP_USERLAND runs ~500 bytes; SO_RCVBUF is set to
+/// 256 KB so the kernel can buffer many of these between drains.
 private let NTSTAT_READ_BUFFER_SIZE = 64 * 1024
 
 /// CTLIOCGINFO is `_IOWR('N', 3, struct ctl_info)`. Swift can't import
-/// macros that compute on a sizeof, so we hand-evaluate it. The encoding
-/// is stable (sys/ioccom.h has not changed in years):
+/// macros that compute on a sizeof, so we hand-evaluate it. Encoding:
 ///   IOC_INOUT (0xC0000000) | ((sizeof(ctl_info) & 0x1FFF) << 16)
 ///       | ('N' << 8) | 3
-/// sizeof(ctl_info) on macOS = 4 (u_int32_t ctl_id) + 96 (char[96]) = 100.
+/// sizeof(ctl_info) = 4 (u_int32_t ctl_id) + 96 (char[96]) = 100.
 private let CTLIOCGINFO: UInt = 0xC064_4E03
 
 /// How often we poll the kernel for fresh counters. Matches the
 /// SessionManager publish tick so per-flow rates align with the
-/// existing 2s-window state-machine semantics.
+/// existing 2-second-window state-machine semantics.
 private let NTSTAT_UPDATE_POLL_INTERVAL: TimeInterval = 2.0
 
 final class NTStatFlowSource: NetworkFlowSource {
 
-    enum FlowFilter {
-        case all
-        case external
-    }
-
-    private let filter: FlowFilter
     private let queue = DispatchQueue(label: "ai.ww-w.AgentRunner.ntstat")
 
     // Live state — all touched only on `queue`.
@@ -55,19 +49,14 @@ final class NTStatFlowSource: NetworkFlowSource {
     private var failureHandler: (@Sendable (Error) -> Void)?
     private var contextCounter: UInt64 = 1
     private var isShuttingDown = false
-    /// Reusable receive buffer — allocated once per source lifecycle to
-    /// avoid per-drain heap churn. ntstat datagrams are well under 64 KB.
+    /// Reusable receive buffer — allocated once per source lifecycle.
     private var rxBuffer: UnsafeMutableRawPointer?
 
-    /// Tracks which srcref values we've already reported as `flowStarted`
-    /// so a periodic UPDATE doesn't re-emit the start event. Map value
-    /// holds the last-known process name (for late-arriving counts after
-    /// a flow ends, which we ignore).
+    /// Tracks which srcref values we've already reported as flowStarted
+    /// so a periodic UPDATE doesn't re-emit the start event.
     private var startedFlows: Set<UInt64> = []
 
-    init(filter: FlowFilter = .external) {
-        self.filter = filter
-    }
+    init() {}
 
     deinit {
         if fd >= 0 { Darwin.close(fd) }
@@ -80,9 +69,6 @@ final class NTStatFlowSource: NetworkFlowSource {
         eventHandler: @escaping @Sendable (NetworkFlowEvent) -> Void,
         failureHandler: @escaping @Sendable (Error) -> Void
     ) throws {
-        // Synchronous setup so we can throw before returning. Run the
-        // socket open + subscription dance on the I/O queue to keep all
-        // mutable state single-threaded thereafter.
         var setupError: Error?
         queue.sync {
             do {
@@ -148,22 +134,35 @@ final class NTStatFlowSource: NetworkFlowSource {
         }
         fd = s
 
-        // 4. Allocate the lifecycle-scoped receive buffer.
+        // 4. Bump SO_RCVBUF — default ~2 KB triggers ENOBUFS as soon as
+        //    the existing flow inventory is dumped on subscribe.
+        var rcvbuf: Int32 = 256 * 1024
+        _ = setsockopt(s, SOL_SOCKET, SO_RCVBUF, &rcvbuf,
+                       socklen_t(MemoryLayout<Int32>.size))
+
+        // 5. Allocate the lifecycle-scoped receive buffer.
         rxBuffer = UnsafeMutableRawPointer.allocate(
             byteCount: NTSTAT_READ_BUFFER_SIZE, alignment: 8)
 
-        // 5. Subscribe TCP_USERLAND + UDP_USERLAND.
+        // 6. Subscribe to all four TCP/UDP providers. KERNEL covers
+        //    BSD-socket apps (Node, Python, Go binaries — every CLI
+        //    agent we care about). USERLAND covers Network-framework /
+        //    NWConnection clients. Without KERNEL, agents like Claude
+        //    Code (Node) are completely invisible to us.
+        try subscribeLocked(provider: .tcpKernel)
+        try subscribeLocked(provider: .udpKernel)
         try subscribeLocked(provider: .tcpUserland)
         try subscribeLocked(provider: .udpUserland)
 
-        // 5. Arm read source on the I/O queue.
+        // 7. Arm read source on the I/O queue.
         let rs = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         rs.setEventHandler { [weak self] in self?.drainSocket() }
         rs.setCancelHandler { [weak self] in self?.handleSourceCancelled() }
         readSource = rs
         rs.resume()
 
-        // 6. Periodic GET_UPDATE poll.
+        // 8. Periodic GET_UPDATE poll. A single message with
+        //    srcref=ALL pulls counts for every active source.
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now() + NTSTAT_UPDATE_POLL_INTERVAL,
                    repeating: NTSTAT_UPDATE_POLL_INTERVAL,
@@ -172,7 +171,7 @@ final class NTStatFlowSource: NetworkFlowSource {
         updateTimer = t
         t.resume()
 
-        NSLog("AgentRunner: ntstat flow source started fd=\(fd) filter=\(filter)")
+        NSLog("AgentRunner: ntstat flow source started fd=\(fd)")
     }
 
     private func tearDownLocked() {
@@ -197,30 +196,17 @@ final class NTStatFlowSource: NetworkFlowSource {
         }
     }
 
-    // MARK: - Subscription request
-
-    private func filterMask() -> UInt64 {
-        switch filter {
-        case .all:
-            return NStatFilter.acceptCellular | NStatFilter.acceptWiFi |
-                   NStatFilter.acceptWired | NStatFilter.acceptLoopback |
-                   NStatFilter.useUpdateForAdd | NStatFilter.providerNoZeroDeltas
-        case .external:
-            return NStatFilter.externalProduction
-        }
-    }
+    // MARK: - Outbound requests
 
     private func subscribeLocked(provider: NStatProvider) throws {
+        // libntstat pattern: zero-init the message and set only the
+        // provider ID. filter=0 + events=0 lets the kernel deliver
+        // every flow for that provider with default semantics.
         var msg = nstat_msg_add_all_srcs()
         msg.hdr.context = nextContext()
         msg.hdr.type = NStatMsgType.addAllSrcs.rawValue
         msg.hdr.length = UInt16(MemoryLayout<nstat_msg_add_all_srcs>.size)
-        msg.hdr.flags = 0
-        msg.filter = filterMask()
-        msg.events = 0
         msg.provider = provider.rawValue
-        msg.target_pid = 0
-        msg.target_uuid = (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)
 
         let written = withUnsafeBytes(of: &msg) { buf -> Int in
             Darwin.send(fd, buf.baseAddress, buf.count, 0)
@@ -230,16 +216,15 @@ final class NTStatFlowSource: NetworkFlowSource {
         }
     }
 
+    /// Single GET_UPDATE with srcref=ALL. Kernel responds with one
+    /// SRC_UPDATE per active source matching our subscriptions —
+    /// including any whose SRC_ADDED we may have missed.
     private func requestUpdate() {
         guard fd >= 0 else { return }
-        // GET_UPDATE with srcref = NSTAT_SRC_REF_ALL — refresh counts
-        // for every tracked source. Kernel responds with SRC_UPDATE
-        // messages (or SRC_COUNTS, depending on filter).
         var msg = nstat_msg_query_src()
         msg.hdr.context = nextContext()
         msg.hdr.type = NStatMsgType.getUpdate.rawValue
         msg.hdr.length = UInt16(MemoryLayout<nstat_msg_query_src>.size)
-        msg.hdr.flags = 0
         msg.srcref = NSTAT_SRC_REF_ALL
         _ = withUnsafeBytes(of: &msg) { buf in
             Darwin.send(fd, buf.baseAddress, buf.count, 0)
@@ -256,8 +241,7 @@ final class NTStatFlowSource: NetworkFlowSource {
 
     private func drainSocket() {
         guard fd >= 0, let buffer = rxBuffer else { return }
-        // SOCK_DGRAM gives one ntstat datagram per recv. Drain until
-        // the kernel queue is empty.
+        // SOCK_DGRAM gives one ntstat datagram per recv.
         readLoop: while true {
             let n = Darwin.recv(fd, buffer, NTSTAT_READ_BUFFER_SIZE, MSG_DONTWAIT)
             if n <= 0 {
@@ -272,16 +256,13 @@ final class NTStatFlowSource: NetworkFlowSource {
     private func decodeChunk(_ chunk: UnsafeRawPointer, length: Int) {
         var offset = 0
         while offset + 16 <= length {
-            // Read the 16-byte header without alignment assumptions.
-            let hdrPtr = chunk.advanced(by: offset).assumingMemoryBound(to: nstat_msg_hdr.self)
+            let hdrPtr = chunk.advanced(by: offset)
+                .assumingMemoryBound(to: nstat_msg_hdr.self)
             let msgLen = Int(hdrPtr.pointee.length)
             let msgType = hdrPtr.pointee.type
-            guard msgLen >= 16, offset + msgLen <= length else {
-                NSLog("AgentRunner: ntstat truncated message len=\(msgLen) avail=\(length - offset)")
-                return
-            }
-            let msgStart = chunk.advanced(by: offset)
-            decodeMessage(msgStart, length: msgLen, type: msgType)
+            guard msgLen >= 16, offset + msgLen <= length else { return }
+            decodeMessage(chunk.advanced(by: offset),
+                          length: msgLen, type: msgType)
             offset += msgLen
         }
     }
@@ -289,30 +270,17 @@ final class NTStatFlowSource: NetworkFlowSource {
     private func decodeMessage(_ p: UnsafeRawPointer, length: Int, type: UInt32) {
         guard let kind = NStatMsgType(rawValue: type) else { return }
         switch kind {
-        case .srcAdded:
-            handleSrcAdded(p, length: length)
-        case .srcRemoved:
-            handleSrcRemoved(p, length: length)
-        case .srcUpdate, .srcExtendedUpdate:
-            handleSrcUpdate(p, length: length)
-        case .srcCounts:
-            handleSrcCounts(p, length: length)
-        case .srcDesc:
-            handleSrcDesc(p, length: length)
-        case .error:
-            // Most "error" responses are normal (e.g., GET_UPDATE for
-            // a srcref that just removed). Logging would be noisy.
-            break
-        case .success:
-            break
-        default:
-            break
+        case .srcAdded:                       handleSrcAdded(p, length: length)
+        case .srcRemoved:                     handleSrcRemoved(p, length: length)
+        case .srcUpdate, .srcExtendedUpdate:  handleSrcUpdate(p, length: length)
+        case .srcCounts:                      handleSrcCounts(p, length: length)
+        case .srcDesc:                        handleSrcDesc(p, length: length)
+        case .error, .success:                break
+        default:                              break
         }
     }
 
     private func handleSrcAdded(_ p: UnsafeRawPointer, length: Int) {
-        // With useUpdateForAdd in the filter mask the kernel sends
-        // SRC_UPDATE instead — but tolerate both shapes.
         guard length >= 24 else { return }   // hdr(16) + srcref(8)
         let srcref = p.load(fromByteOffset: 16, as: UInt64.self)
         // Without a descriptor we can't classify the flow yet. Request one.
@@ -320,7 +288,6 @@ final class NTStatFlowSource: NetworkFlowSource {
         req.hdr.context = nextContext()
         req.hdr.type = NStatMsgType.getSrcDesc.rawValue
         req.hdr.length = UInt16(MemoryLayout<nstat_msg_query_src>.size)
-        req.hdr.flags = 0
         req.srcref = srcref
         _ = withUnsafeBytes(of: &req) { buf in
             Darwin.send(fd, buf.baseAddress, buf.count, 0)
@@ -328,7 +295,7 @@ final class NTStatFlowSource: NetworkFlowSource {
     }
 
     private func handleSrcRemoved(_ p: UnsafeRawPointer, length: Int) {
-        guard length >= 24 else { return }   // hdr(16) + srcref(8)
+        guard length >= 24 else { return }
         let srcref = p.load(fromByteOffset: 16, as: UInt64.self)
         if startedFlows.remove(srcref) != nil {
             emit(.flowEnded(flowID: srcref))
@@ -361,10 +328,9 @@ final class NTStatFlowSource: NetworkFlowSource {
     }
 
     private func handleSrcCounts(_ p: UnsafeRawPointer, length: Int) {
-        guard length >= 144 else { return }   // hdr(16) + srcref(8) + event_flags(8) + counts(112)
+        guard length >= 144 else { return }   // hdr + srcref + event_flags + counts
         let srcref = p.load(fromByteOffset: 16, as: UInt64.self)
         guard startedFlows.contains(srcref) else { return }
-        // counts begins at offset 32; rxbytes is the second u64 in counts.
         let rxbytes = p.load(fromByteOffset: 32 + 8, as: UInt64.self)
         let txbytes = p.load(fromByteOffset: 32 + 24, as: UInt64.self)
         emit(.flowUpdated(flowID: srcref, bytesIn: rxbytes, bytesOut: txbytes))
@@ -378,6 +344,7 @@ final class NTStatFlowSource: NetworkFlowSource {
         let provider = p.load(fromByteOffset: 32, as: UInt32.self)
         let descLen = length - NSTAT_DESC_HEADER_SIZE
         guard !startedFlows.contains(srcref) else { return }
+
         if let desc = makeDescriptor(srcref: srcref, provider: provider,
                                      data: p.advanced(by: NSTAT_DESC_HEADER_SIZE),
                                      length: descLen) {
@@ -386,10 +353,8 @@ final class NTStatFlowSource: NetworkFlowSource {
         }
     }
 
-    // MARK: - Decoding helpers
-
     /// Build a FlowDescriptor from a provider-specific descriptor blob.
-    /// Only TCP/UDP USERLAND providers are supported — others are dropped.
+    /// Only TCP/UDP providers are supported; others are dropped.
     private func makeDescriptor(srcref: UInt64,
                                 provider: UInt32,
                                 data: UnsafeRawPointer,
@@ -435,8 +400,6 @@ final class NTStatFlowSource: NetworkFlowSource {
             return nil
         }
     }
-
-    // MARK: - Emit
 
     private func emit(_ kind: NetworkFlowEvent.Kind) {
         let event = NetworkFlowEvent(kind: kind, timestamp: Date())
