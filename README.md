@@ -70,9 +70,9 @@ brew upgrade --cask agentrunner
 
 ## How it works
 
-AgentRunner watches outbound **network traffic** to known LLM API endpoints via macOS `nettop`. It maps bytes-per-second to character state and animation speed:
+AgentRunner watches outbound **network traffic** to known LLM API endpoints via the macOS network statistics kernel control. It maps bytes-per-second to character state and animation speed:
 
-- **Lightweight** — `nettop` is a single OS-level subprocess that watches every session at once. CPU < 1%.
+- **Lightweight** — talks to `com.apple.network.statistics` in-process with push semantics. Idle CPU near zero; active CPU low single digits.
 - **Accurate** — LLMs run over an API, so the network traffic *is* the ground truth of activity. No heuristics, no guessing.
 - **Tool-agnostic** — Claude Code, Codex, Cursor, custom loops, brand new LLM APIs — register the host and you're done. No SDK integration.
 - **Zero dependencies** — No proxy, no certificate, no permissions, no in-process hooks. Drop the app in `/Applications` and it works.

@@ -33,21 +33,33 @@ AgentRunner/                     # project root
 
 ## Core Architecture
 
-### 1. nettop → Session → CharacterAnimator pipeline
+### 1. NetworkFlowSource → Session → CharacterAnimator pipeline
 
 ```
-nettop (external process, 2s sampling)
-  ↓ stdout lines
-NettopParser.parse() → NettopEvent (.process / .connection)
-  ↓
+NTStatFlowSource (in-process kernel control socket: ntstat private SPI)
+  ↓ NetworkFlowEvent (.flowStarted / .flowUpdated / .flowEnded)
 SessionManager.handle(event) [background queue]
-  ↓ pendingSample accumulates, processed every 3s tick
+  ↓ liveFlows[flowID] cumulative bytes; aggregated every 2s self-tick
 Session.ingest() → bytesInRate / bytesOutRate → state machine evaluation
   ↓ on aggregate state change
 CharacterAnimator.render(agg) [main thread]
   ↓ frame update
 NSStatusItem.button.image
 ```
+
+**Signal source is abstracted** behind the `NetworkFlowSource` protocol.
+`SessionManager` knows nothing about ntstat — it consumes value-typed
+`NetworkFlowEvent`s from any conformer. Tests inject `MockFlowSource`;
+production wires `NTStatFlowSource(filter: .external)`.
+
+**ntstat in-process, not nettop subprocess.** Pre-2.0 versions spawned
+`/usr/bin/nettop -L 0 -t external -x -s 2` and parsed CSV. That hit
+138% CPU on a developer Mac because nettop polls the full kernel flow
+table every 2s. Since v2.0, AgentRunner talks to the same kernel
+control (`com.apple.network.statistics`) directly — push semantics for
+SRC_ADDED/REMOVED, periodic GET_UPDATE for byte counters, idle CPU near
+zero. The vendored constants live in `NTStatProtocol.swift` (xnu
+private API; see `docs/superpowers/specs/2026-05-02-ntstat-migration-design.md`).
 
 ### 2. Session state machine (`src/AgentRunner/Session.swift`)
 
@@ -148,11 +160,11 @@ python3 scripts/make_gifs.py
 - **Never expose `Session` (reference type) to the main thread.** Always go through `sessionSnapshot()` which returns `SessionSnapshot` value copies.
 - **Never commit build/release artifacts** (`dist/`, `*.dmg`, `*.app`) — they're in `.gitignore`.
 - **Never hardcode absolute paths** (`/Users/...`). All paths in scripts must be derived from `__file__` (Python) or relative to script dir (shell).
-- **Never leave `NettopMonitor.isShuttingDown = true` after `stop()`.** `start()` resets it to `false` first; if you remove that reset, `spawnNettop()` will silently `return` on the very next start (sleep/wake cycle bug fixed in v1.0.9). The same pattern applies to any future "shutdown flag" — reset on the next start, not at the end of stop, to keep stop idempotent.
+- **Never leave a "shutdown" flag set after `stop()`.** Idempotent `stop()` + `start()` resets state — sleep/wake cycle relies on this. The historical bug (v1.0.9) was `NettopMonitor.isShuttingDown` not getting reset; the same pattern applies to `NTStatFlowSource.isShuttingDown` and any future signal source. Reset on the next `start()`, not at the end of `stop()`.
 
 ## FAQ — Decisions That Should Not Be Re-Litigated
 
-- **Why nettop?** It's an OS tool — no permissions, no proxy, no certificates needed. Network traffic to known LLM hosts is the ground truth of agent activity. Heuristics on file/clipboard/process activity would be both more invasive and less accurate.
+- **Why network traffic to known LLM hosts?** Ground truth of agent activity. No permissions, no proxy, no certificates needed. Heuristics on file/clipboard/process activity would be both more invasive and less accurate. **Why ntstat directly instead of nettop subprocess?** Same data source, but in-process push semantics drop idle CPU from 138% to near-zero — see the design spec.
 - **Why AppKit instead of SwiftUI?** Menu bar apps are NSStatusItem-native. AppKit gives precise control with ~20 MB idle memory footprint (flat regardless of session count). SwiftUI for menu bar would add overhead with no UX win.
 - **Why no NSWindow / Preferences window?** RunCat-style minimalism. Pref windows add memory cost for a feature used rarely. The menu (right-click) handles all settings.
 - **Why was the `enabled` field removed from providers.jsonc guidance?** Disabling = comment out the line with `//`. One mechanism is simpler than two. The struct still tolerates the field for backward compatibility.

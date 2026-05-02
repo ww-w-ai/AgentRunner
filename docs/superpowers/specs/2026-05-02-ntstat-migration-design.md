@@ -1,7 +1,7 @@
 # Design Spec — Replace nettop subprocess with ntstat in-process client
 
 **Date:** 2026-05-02
-**Status:** Approved (brainstorming complete, ready for plan)
+**Status:** Implemented (commits `c76dd67`, `9a75f5c`, `a6d0ee4`)
 **Scope:** Single PR, full replacement
 
 ## 1. Problem
@@ -226,7 +226,10 @@ The following files are deleted:
 - `src/AgentRunner/NettopMonitor.swift`
 - `src/AgentRunner/NettopParser.swift`
 - `src/AgentRunner/NettopEvent.swift`
-- `src/AgentRunner/Blocklist.swift` (only used by NettopParser; verify no other callers before deletion)
+- ~~`src/AgentRunner/Blocklist.swift`~~ — **kept**: also called from
+  `SessionManager.ingestStart` to suppress browsers/Slack/etc. that
+  hit LLM IPs but aren't AI agents. The "only used by NettopParser"
+  note in the original draft was wrong.
 
 `AppDelegate` references to `nettop` (start, stop, sleep/wake handlers) replaced with `sessionManager.start()/stop()`.
 
@@ -261,11 +264,28 @@ Single PR. The branch deletes nettop code and adds ntstat code in one commit (or
 - Auto-update / Sparkle integration changes
 - UI redesign
 
-## 11. Open implementation details (deferred to plan phase)
+## 11. Implementation decisions (resolved)
 
-- Exact subscription request flags for `nstat_msg_add_all_srcs` (TCP only? UDP also? `NSTAT_FILTER_*` choice).
-- Whether to use `DispatchSourceRead` on the control socket vs a dedicated thread.
-- Mapping from ntstat process-name truncation to a stable string for ProviderRegistry consumers.
-- Exact `flowID` source — `nstat_src_ref_t` is the obvious choice; verify it does not get reused within a session.
-
-These are answered in the implementation plan, not here.
+- **Subscription**: `ADD_ALL_SRCS` separately for `NSTAT_PROVIDER_TCP_USERLAND`
+  and `NSTAT_PROVIDER_UDP_USERLAND`. Filter mask
+  (`NStatFilter.externalProduction`) accepts cellular + WiFi + wired,
+  rejects loopback, sets `USE_UPDATE_FOR_ADD` so the kernel pushes a
+  combined SRC_UPDATE on flow creation, and `PROVIDER_NOZERODELTAS` to
+  suppress chatter from idle flows.
+- **Read pump**: `DispatchSourceRead` on the kernel control socket,
+  serialized to the source's I/O queue. Periodic `GET_UPDATE` (with
+  `srcref = NSTAT_SRC_REF_ALL`) on a `DispatchSourceTimer` every 2 s to
+  refresh byte counters. SOCK_DGRAM gives one ntstat message per recv,
+  so the drain loop is straightforward.
+- **Process name**: extracted directly from the descriptor's `pname[64]`
+  field (UTF-8, NUL-terminated). Exposed verbatim — the `Blocklist`
+  matcher already uses `contains` substring semantics, so trailing
+  punctuation/version tails don't break it.
+- **flowID**: `nstat_src_ref_t` (u64). Kernel guarantees uniqueness for
+  the lifetime of a flow. We track `startedFlows: Set<UInt64>` and emit
+  `flowEnded` on `SRC_REMOVED` to release.
+- **Alignment**: incoming messages are decoded with
+  `load(fromByteOffset:as:)` rather than struct-pointer dereferences,
+  removing any reliance on alignment of the recv buffer offsets.
+- **Receive buffer**: 64 KB, allocated once per source lifecycle in
+  `setUpLocked`, freed in `tearDownLocked` and `deinit`.
