@@ -68,6 +68,14 @@ final class ProviderRegistry {
         return dir.appendingPathComponent("providers.jsoncc")
     }
 
+    /// IP 캐시 영속화 경로. 콜드스타트 시 기존에 본 IP 풀을 즉시 복원해
+    /// CDN 회전으로 인한 신규 세션 미스를 줄인다.
+    static var cacheURL: URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = support.appendingPathComponent("AgentRunner", isDirectory: true)
+        return dir.appendingPathComponent("ip_cache.json")
+    }
+
     /// 파일에서 로드. 없으면 시드로 초기화. JSONC(주석/trailing comma 허용) 지원.
     static func loadFromFile() -> [Provider] {
         let url = configURL
@@ -148,10 +156,29 @@ final class ProviderRegistry {
 
     // MARK: - Instance state
 
-    private let refreshInterval: TimeInterval = 60   // 1분 — Cloudflare 등 짧은 TTL 추적
-    private let entryTTL: TimeInterval = 3600        // 1시간 — 한 번 본 IP는 이 기간 동안 유효
-    private struct Entry { let provider: String; var expiresAt: Date }
+    /// Fast 모드: 신규 IP 풀을 빠르게 학습하는 단계 (1분 간격).
+    /// Slow 모드: 안정 운영 단계 (10분 간격). CPU/배터리 절약.
+    private let fastRefreshInterval: TimeInterval = 60
+    private let slowRefreshInterval: TimeInterval = 600
+    private let entryTTL: TimeInterval = 90 * 24 * 3600   // 90일 — 한 번 본 IP는 이 기간 동안 유효
+
+    /// 첫 설치/리셋 후 누적 60분 도달 전: 매 실행 시 fast 60분 → slow.
+    /// 그 이후엔 매 실행 시 fast 10분(warm-up) → slow.
+    private let initialFastBudgetSeconds: TimeInterval = 3600   // 신규 앱 1시간
+    private let warmupFastBudgetSeconds: TimeInterval = 600     // 성숙 앱 10분 워밍업
+    private let maturityThresholdMinutes: Double = 60.0
+
+    /// UserDefaults 키 — 누적 실행시간(분 단위, fast +1, slow +10).
+    /// 디버깅: `defaults read <bundle> AgentRunner.cumulativeRefreshMinutes`
+    private static let cumulativeMinutesKey = "AgentRunner.cumulativeRefreshMinutes"
+
+    /// 이번 세션의 fast 예산. start() 시점에 누적값에 따라 결정.
+    private var sessionFastBudgetSeconds: TimeInterval = 0
+    private var sessionFastElapsedSeconds: TimeInterval = 0
+
+    private struct Entry: Codable { let provider: String; var expiresAt: Date }
     private var ipToProvider: [String: Entry] = [:]
+    private static let saveDebounceQueue = DispatchQueue(label: "AgentRunner.cacheSave", qos: .utility)
     private let lock = NSLock()
     private var refreshTimer: DispatchSourceTimer?
     private var changeObserver: NSObjectProtocol?
@@ -164,6 +191,12 @@ final class ProviderRegistry {
     private(set) var isOnline: Bool = true
 
     func start() {
+        loadCacheFromDisk()
+        let cumulative = UserDefaults.standard.double(forKey: Self.cumulativeMinutesKey)
+        sessionFastBudgetSeconds = cumulative < maturityThresholdMinutes
+            ? initialFastBudgetSeconds : warmupFastBudgetSeconds
+        sessionFastElapsedSeconds = 0
+        NSLog("AgentRunner: refresh schedule — cumulative=\(Int(cumulative))min, fast budget=\(Int(sessionFastBudgetSeconds))s")
         refreshNow()
         scheduleRefresh()
         startPathMonitor()
@@ -236,11 +269,38 @@ final class ProviderRegistry {
     }
 
     private func scheduleRefresh() {
+        let interval = currentRefreshInterval()
         let timer = DispatchSource.makeTimerSource(queue: .global(qos: .background))
-        timer.schedule(deadline: .now() + refreshInterval, repeating: refreshInterval)
-        timer.setEventHandler { [weak self] in self?.refreshNow() }
+        timer.schedule(deadline: .now() + interval, repeating: interval)
+        timer.setEventHandler { [weak self] in self?.handleRefreshTick() }
         timer.resume()
         refreshTimer = timer
+    }
+
+    private func currentRefreshInterval() -> TimeInterval {
+        return sessionFastElapsedSeconds < sessionFastBudgetSeconds
+            ? fastRefreshInterval : slowRefreshInterval
+    }
+
+    /// 매 틱마다 누적/세션 카운터 업데이트 후 dig 실행. fast→slow 전환 시점에
+    /// 타이머 재스케줄.
+    private func handleRefreshTick() {
+        let interval = currentRefreshInterval()
+        let isFast = (interval == fastRefreshInterval)
+        let increment = isFast ? 1.0 : 10.0
+        let prev = UserDefaults.standard.double(forKey: Self.cumulativeMinutesKey)
+        UserDefaults.standard.set(prev + increment, forKey: Self.cumulativeMinutesKey)
+
+        if isFast {
+            sessionFastElapsedSeconds += fastRefreshInterval
+            if sessionFastElapsedSeconds >= sessionFastBudgetSeconds {
+                NSLog("AgentRunner: fast budget exhausted — switching to slow (10m)")
+                refreshTimer?.cancel()
+                refreshTimer = nil
+                scheduleRefresh()
+            }
+        }
+        refreshNow()
     }
 
     private func refreshNow() {
@@ -269,8 +329,47 @@ final class ProviderRegistry {
                 }
             }
             let total = self.ipToProvider.count
+            let snapshot = self.ipToProvider
             self.lock.unlock()
             NSLog("AgentRunner: providers refreshed, \(freshSeen.count) resolved, \(total) IPs cached")
+            self.saveCacheToDisk(snapshot)
+        }
+    }
+
+    private func loadCacheFromDisk() {
+        let url = Self.cacheURL
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        do {
+            let data = try Data(contentsOf: url)
+            let decoded = try JSONDecoder().decode([String: Entry].self, from: data)
+            let now = Date()
+            let live = decoded.filter { $0.value.expiresAt >= now }
+            lock.lock()
+            ipToProvider = live
+            lock.unlock()
+            NSLog("AgentRunner: IP cache hydrated from disk — \(live.count) live (\(decoded.count - live.count) expired)")
+        } catch {
+            NSLog("AgentRunner: IP cache read error — \(error.localizedDescription). Starting empty.")
+        }
+    }
+
+    private func saveCacheToDisk(_ snapshot: [String: Entry]) {
+        Self.saveDebounceQueue.async {
+            // 매 refresh마다 timestamp가 갱신되므로 dedup 없이 항상 저장.
+            // 페이로드 < 100KB, 인터벌도 1~10분이라 부담 무시 가능.
+            let url = Self.cacheURL
+            do {
+                try FileManager.default.createDirectory(
+                    at: url.deletingLastPathComponent(),
+                    withIntermediateDirectories: true)
+                let data = try JSONEncoder().encode(snapshot)
+                let tmp = url.appendingPathExtension("tmp")
+                try data.write(to: tmp, options: .atomic)
+                _ = try? FileManager.default.removeItem(at: url)
+                try FileManager.default.moveItem(at: tmp, to: url)
+            } catch {
+                NSLog("AgentRunner: IP cache write error — \(error.localizedDescription)")
+            }
         }
     }
 

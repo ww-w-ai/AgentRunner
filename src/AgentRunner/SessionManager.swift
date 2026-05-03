@@ -72,6 +72,33 @@ final class SessionManager: @unchecked Sendable {
         self.flowSource = flowSource
     }
 
+    /// PENDING 로그 노이즈 필터. AI 트래픽일 가능성이 0인 시스템 서비스 / 메신저는
+    /// PENDING 자체는 등록하되 (혹시 모를 IP 매칭 기회를 위해) 로그는 안 남긴다.
+    /// 진단 시점에 정말 봐야 할 후보 flow만 콘솔에 노출하기 위함.
+    private static let pendingLogNoisePatterns: [String] = [
+        "rapportd", "identityservicesd", "IPNExtension", "mDNSResponder",
+        "trustd", "apsd", "sharingd", "nsurlsessiond", "cloudd", "bird",
+        "KakaoTalk", "Telegram", "WhatsApp",
+        // Apple 개발 도구 — Akamai/Apple 다운로드 트래픽이 전부.
+        // 향후 Apple Intelligence cloud endpoint 추가 시 재검토.
+        "Xcode", "CrossEXService",
+    ]
+    private static func isLogWorthyPending(_ desc: FlowDescriptor) -> Bool {
+        let lower = desc.processName.lowercased()
+        return !pendingLogNoisePatterns.contains { lower.contains($0.lowercased()) }
+    }
+
+    /// Layer 0 필터. Provider IP는 모두 public이므로 loopback/link-local/
+    /// unspecified는 어떤 provider 캐시에도 매칭될 수 없다.
+    private static func isUnreachableForProviderMatch(_ host: String) -> Bool {
+        if host.isEmpty { return true }
+        if host == "0.0.0.0" || host == "::" { return true }
+        if host == "127.0.0.1" || host == "::1" { return true }
+        if host.hasPrefix("127.") { return true }   // 127.0.0.0/8
+        if host.hasPrefix("fe80:") { return true }  // IPv6 link-local
+        return false
+    }
+
     // MARK: - Lifecycle
 
     /// Start consuming events. Throws if the underlying flow source
@@ -134,11 +161,16 @@ final class SessionManager: @unchecked Sendable {
     }
 
     private func ingestStart(_ desc: FlowDescriptor, at now: Date) {
+        // Layer 0: loopback / link-local / unspecified — 절대 AI provider 매칭
+        // 후보가 될 수 없으므로 ingest 단계에서 drop. pendingFlows 슬롯과
+        // reclassifyPending 비용을 아낌.
+        if Self.isUnreachableForProviderMatch(desc.remote.host) { return }
         // Layer 1: blocklist (browsers / chat clients that hit LLM IPs
         // but aren't AI agents themselves).
         if Blocklist.isBlocked(desc.processName) { return }
         // Layer 2: provider classification by remote IP.
         if let provider = registry.providerName(forIP: desc.remote.host) {
+            NSLog("AgentRunner: flow MATCH ip=\(desc.remote.host) pname=\(desc.processName) provider=\(provider)")
             liveFlows[desc.flowID] = FlowSlot(
                 session: SessionKey(pid: desc.pid, provider: provider),
                 processName: desc.processName,
@@ -146,6 +178,9 @@ final class SessionManager: @unchecked Sendable {
                 bytesOut: 0
             )
         } else {
+            if Self.isLogWorthyPending(desc) {
+                NSLog("AgentRunner: flow PENDING ip=\(desc.remote.host) pname=\(desc.processName) pid=\(desc.pid)")
+            }
             // No match yet — defer in case the registry catches up
             // (DNS refresh, network change, system wake). Re-evaluated
             // on each tick. Critical because ntstat emits SRC_DESC for

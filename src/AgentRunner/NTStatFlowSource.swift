@@ -37,6 +37,28 @@ private let CTLIOCGINFO: UInt = 0xC064_4E03
 /// existing 2-second-window state-machine semantics.
 private let NTSTAT_UPDATE_POLL_INTERVAL: TimeInterval = 2.0
 
+// libproc.h — pid → process name 안정 API. xnu의 nstat descriptor pname
+// 필드가 macOS 빌드에 따라 빈 칸/버전 문자열 등으로 흐트러지는 케이스가
+//있어, 이 syscall 한 방으로 우회한다. macOS 13+ 모두 지원.
+@_silgen_name("proc_name")
+private func proc_name(_ pid: Int32,
+                       _ buffer: UnsafeMutableRawPointer,
+                       _ buffersize: UInt32) -> Int32
+
+/// pid → process name. 실패 시 nil. 빈 문자열 반환 시에도 nil (descriptor의
+/// pname을 fallback으로 쓰게 만들기 위함).
+private func resolveProcessName(pid: Int32) -> String? {
+    guard pid > 0 else { return nil }
+    var buf = [CChar](repeating: 0, count: 256)
+    let n = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+        guard let base = ptr.baseAddress else { return -1 }
+        return proc_name(pid, UnsafeMutableRawPointer(base), UInt32(ptr.count))
+    }
+    guard n > 0 else { return nil }
+    let name = String(cString: buf)
+    return name.isEmpty ? nil : name
+}
+
 final class NTStatFlowSource: NetworkFlowSource {
 
     private let queue = DispatchQueue(label: "ai.ww-w.AgentRunner.ntstat")
@@ -199,14 +221,18 @@ final class NTStatFlowSource: NetworkFlowSource {
     // MARK: - Outbound requests
 
     private func subscribeLocked(provider: NStatProvider) throws {
-        // libntstat pattern: zero-init the message and set only the
-        // provider ID. filter=0 + events=0 lets the kernel deliver
-        // every flow for that provider with default semantics.
+        // 디자인 스펙(2026-05-02-ntstat-migration-design.md §11)이 명시한
+        // externalProduction 필터:
+        //  - acceptCellular | acceptWiFi | acceptWired: 외부 인터페이스만
+        //  - useUpdateForAdd: 신규 flow 시 SRC_UPDATE에 descriptor 인라인.
+        //    SRC_ADDED→getSrcDesc 라운드트립 race 가능성 제거.
+        //  - providerNoZeroDeltas: idle flow의 0-byte chatter 억제.
         var msg = nstat_msg_add_all_srcs()
         msg.hdr.context = nextContext()
         msg.hdr.type = NStatMsgType.addAllSrcs.rawValue
         msg.hdr.length = UInt16(MemoryLayout<nstat_msg_add_all_srcs>.size)
         msg.provider = provider.rawValue
+        msg.filter = NStatFilter.externalProduction
 
         let written = withUnsafeBytes(of: &msg) { buf -> Int in
             Darwin.send(fd, buf.baseAddress, buf.count, 0)
@@ -371,10 +397,11 @@ final class NTStatFlowSource: NetworkFlowSource {
                                            offset: TCPDescriptorOffsets.local,
                                            totalLength: length)
                 ?? SocketAddress(host: "", port: 0)
-            let pname = parseCString(data,
-                                     offset: TCPDescriptorOffsets.pname,
-                                     maxLen: 64,
-                                     totalLength: length)
+            let pname = resolveProcessName(pid: pid)
+                ?? parseCString(data,
+                                offset: TCPDescriptorOffsets.pname,
+                                maxLen: 64,
+                                totalLength: length)
             return FlowDescriptor(flowID: srcref, pid: pid, processName: pname,
                                   proto: IPPROTO_TCP, local: local, remote: remote)
 
@@ -389,10 +416,11 @@ final class NTStatFlowSource: NetworkFlowSource {
                                            offset: UDPDescriptorOffsets.local,
                                            totalLength: length)
                 ?? SocketAddress(host: "", port: 0)
-            let pname = parseCString(data,
-                                     offset: UDPDescriptorOffsets.pname,
-                                     maxLen: 64,
-                                     totalLength: length)
+            let pname = resolveProcessName(pid: pid)
+                ?? parseCString(data,
+                                offset: UDPDescriptorOffsets.pname,
+                                maxLen: 64,
+                                totalLength: length)
             return FlowDescriptor(flowID: srcref, pid: pid, processName: pname,
                                   proto: IPPROTO_UDP, local: local, remote: remote)
 

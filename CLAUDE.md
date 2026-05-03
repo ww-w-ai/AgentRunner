@@ -61,6 +61,20 @@ SRC_ADDED/REMOVED, periodic GET_UPDATE for byte counters, idle CPU near
 zero. The vendored constants live in `NTStatProtocol.swift` (xnu
 private API; see `docs/superpowers/specs/2026-05-02-ntstat-migration-design.md`).
 
+**Subscription filter (v1.2.0):** uses `NStatFilter.externalProduction`
+(`acceptCellular | acceptWiFi | acceptWired | useUpdateForAdd | providerNoZeroDeltas`)
+per the migration spec. `useUpdateForAdd` makes the kernel deliver new
+flows as a single SRC_UPDATE with descriptor inline, removing a
+SRC_ADDED → getSrcDesc round-trip race that intermittently lost new
+sessions in v1.1.x. The legacy round-trip path remains as fallback.
+
+**Process name (v1.2.0):** descriptor's `pname[64]` field is unreliable
+across xnu builds (sometimes empty, sometimes a version string set by
+the userland process via `process.title`). `NTStatFlowSource` now calls
+`proc_name(pid)` from libproc as the primary source and falls back to
+the descriptor field on failure. Stable Apple API, robust against
+descriptor layout drift.
+
 ### 2. Session state machine (`src/AgentRunner/Session.swift`)
 
 | State     | Meaning                              | Entry condition                                                  |
@@ -121,7 +135,9 @@ enum AnimID {
 - **First launch:** seed file written via `writeSeedFile()`, in-memory `seedProviders` constant returned
 - **Subsequent launches:** the file is the single source of truth. Edit + menu → Reload Providers (⌘R)
 - **Parse failure:** falls back to seed providers, file untouched (so user can fix and reload)
-- **IP matching:** `dig +short` resolves hostnames. Refresh triggers: app start, every 10 minutes, system wake (`AppDelegate.receiveWake` → `registry.refresh()`), and on network path change (NWPathMonitor inside `ProviderRegistry`, debounced 1s) — covers Wi-Fi switch, VPN toggle, LTE handoff. `isOnline` flag is also exposed for `UpdateChecker` to short-circuit when offline.
+- **IP matching:** `dig +short` resolves hostnames. Refresh triggers: app start, periodic timer, system wake (`AppDelegate.receiveWake` → `registry.refresh()`), and on network path change (NWPathMonitor inside `ProviderRegistry`, debounced 1s) — covers Wi-Fi switch, VPN toggle, LTE handoff. `isOnline` flag is also exposed for `UpdateChecker` to short-circuit when offline.
+- **Refresh interval (v1.2.0):** dynamic fast/slow. Fast 60s while warming the cache, slow 600s in steady state. New install: 1 hour fast → slow. Warm install: 10 min fast → slow. Cumulative tracked in `UserDefaults` (`AgentRunner.cumulativeRefreshMinutes`, +1 per fast tick, +10 per slow). Doubles as a rough total-runtime indicator.
+- **IP cache (v1.2.0):** disk-persisted at `~/Library/Application Support/AgentRunner/ip_cache.json`. 90-day TTL per entry. Hydrated on `start()` so cold-start doesn't miss flows whose IPs aren't yet in `dig` output. CDN IP rotation tolerated by the long TTL — re-seen IPs get their `expiresAt` extended.
 - **⚠️ Adding new built-ins via `seedProviders` constant alone won't reach existing users** — their `providers.jsonc` was already written. A migration step (merge missing built-ins) would be needed.
 
 ### 5. SessionPopover (left-click) — race-free
