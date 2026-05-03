@@ -150,6 +150,7 @@ final class Session {
             }
         }
 
+#if DEBUG
         if bytesInRate > 0 || bytesOutRate > 0 {
             NSLog("[SESSION %d/%@] in=%.0fB/s out=%.0fB/s state=%@→%@",
                   key.pid, key.provider,
@@ -157,6 +158,7 @@ final class Session {
                   String(describing: state),
                   String(describing: target))
         }
+#endif
 
         applyTransition(to: target, now: now)
     }

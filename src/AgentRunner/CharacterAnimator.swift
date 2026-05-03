@@ -159,12 +159,14 @@ final class CharacterAnimator {
             let dur = TimeInterval(currentFrames.count) * currentInterval
             activeSinceForCombo = Date().addingTimeInterval(dur)
             lastComboAttempt = activeSinceForCombo
+#if DEBUG
         case .threeHit:
             NSLog("AgentRunner: ▶︎ three-hit (frames=\(currentFrames.count), interval=\(Int(currentInterval*1000))ms)")
         case .supreme:
             NSLog("AgentRunner: ⚡️ supreme (frames=\(currentFrames.count), interval=\(Int(currentInterval*1000))ms)")
         case .toolingWrapUp:
             NSLog("AgentRunner: 🔧 tooling wrap-up (frames=\(currentFrames.count))")
+#endif
         default:
             break
         }
