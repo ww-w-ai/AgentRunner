@@ -103,7 +103,7 @@ Out of the box, AgentRunner detects traffic to the official API endpoints of the
 |:-------------- |:------------------------------------------------------------------ |:--------------------------------------------- |
 | **Anthropic**  | `api.anthropic.com`                                                | Claude API (powers Claude Code)               |
 | **OpenAI**     | `api.openai.com`                                                   | ChatGPT / GPT-4 / o-series (powers Codex CLI) |
-| **Google**     | `generativelanguage.googleapis.com`<br>`aiplatform.googleapis.com` | Gemini API + Vertex AI                        |
+| **Google**     | `generativelanguage.googleapis.com`<br>`aiplatform.googleapis.com` | Gemini API + Vertex AI — see caveat below     |
 | **OpenRouter** | `openrouter.ai`                                                    | Multi-provider routing gateway                |
 | **xAI**        | `api.x.ai`                                                         | Grok                                          |
 | **DeepSeek**   | `api.deepseek.com`                                                 | DeepSeek-V / R series                         |
@@ -114,6 +114,8 @@ Out of the box, AgentRunner detects traffic to the official API endpoints of the
 | **Perplexity** | `api.perplexity.ai`                                                | Sonar series                                  |
 
 Hosts are resolved via `dig` at startup, on every 10-minute tick, on system wake, and whenever the network path changes (Wi-Fi switch, VPN toggle, LTE handoff). CDN / Anycast IP rotation is handled automatically.
+
+> **Caveat — Gemini API false positives.** `generativelanguage.googleapis.com` shares Google's public frontend IP pool (`142.250.*.*`, `172.217.*.*`) with most other `*.googleapis.com` services (Drive, Calendar, Maps, Chrome sync, Analytics, …). Because matching is purely IP-based, unrelated Google traffic can be tagged as a Gemini session. Vertex AI (`aiplatform.googleapis.com`) is on a dedicated `34.128.*.*` range and is not affected. If the noise bothers you, comment out the `generativelanguage.googleapis.com` line in `providers.jsonc`.
 
 ---
 

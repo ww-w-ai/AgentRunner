@@ -34,6 +34,11 @@ final class SessionManager: @unchecked Sendable {
         let processName: String
         var bytesIn: UInt64
         var bytesOut: UInt64
+        // Cumulative bytes captured at the end of the previous tick.
+        // Used to detect zero-delta flows so a long-lived but idle
+        // connection can't keep reviving a GC'd session every tick.
+        var lastTickBytesIn: UInt64
+        var lastTickBytesOut: UInt64
     }
     private var liveFlows: [UInt64: FlowSlot] = [:]
 
@@ -175,7 +180,9 @@ final class SessionManager: @unchecked Sendable {
                 session: SessionKey(pid: desc.pid, provider: provider),
                 processName: desc.processName,
                 bytesIn: 0,
-                bytesOut: 0
+                bytesOut: 0,
+                lastTickBytesIn: 0,
+                lastTickBytesOut: 0
             )
         } else {
             if Self.isLogWorthyPending(desc) {
@@ -225,7 +232,9 @@ final class SessionManager: @unchecked Sendable {
                     session: SessionKey(pid: p.descriptor.pid, provider: provider),
                     processName: p.descriptor.processName,
                     bytesIn: p.lastBytesIn,
-                    bytesOut: p.lastBytesOut
+                    bytesOut: p.lastBytesOut,
+                    lastTickBytesIn: p.lastBytesIn,
+                    lastTickBytesOut: p.lastBytesOut
                 )
                 promotedKeys.append(id)
             } else if now.timeIntervalSince(p.firstSeen) > pendingMaxAge {
@@ -249,19 +258,36 @@ final class SessionManager: @unchecked Sendable {
         // 1. Flow → session aggregation. A single (PID, provider) pair
         //    can have multiple concurrent flows (parallel HTTP/2 streams,
         //    OpenAI's separate conn for tool calls, etc.).
-        var perSession: [SessionKey: (name: String, bIn: UInt64, bOut: UInt64)] = [:]
-        for (_, slot) in liveFlows {
+        //
+        //    `hasDelta` tracks whether any flow for this session moved
+        //    bytes since the last tick. Without it, a long-lived but
+        //    quiet keep-alive flow would re-create a freshly-GC'd
+        //    session on every tick (Session.init stamps lastActivity =
+        //    now, so the zombie never ages out).
+        var perSession: [SessionKey: (name: String, bIn: UInt64, bOut: UInt64, hasDelta: Bool)] = [:]
+        for (id, slot) in liveFlows {
+            let delta = (slot.bytesIn > slot.lastTickBytesIn) ||
+                        (slot.bytesOut > slot.lastTickBytesOut)
             if let existing = perSession[slot.session] {
                 perSession[slot.session] = (existing.name,
                                             existing.bIn + slot.bytesIn,
-                                            existing.bOut + slot.bytesOut)
+                                            existing.bOut + slot.bytesOut,
+                                            existing.hasDelta || delta)
             } else {
                 perSession[slot.session] = (slot.processName,
                                             slot.bytesIn,
-                                            slot.bytesOut)
+                                            slot.bytesOut,
+                                            delta)
             }
+            // Snapshot baseline for next tick.
+            var updated = slot
+            updated.lastTickBytesIn = slot.bytesIn
+            updated.lastTickBytesOut = slot.bytesOut
+            liveFlows[id] = updated
         }
         for (key, sample) in perSession {
+            // Don't resurrect a GC'd session from a quiet flow.
+            guard sessions[key] != nil || sample.hasDelta else { continue }
             let session = sessions[key] ?? Session(key: key, processName: sample.name)
             session.ingest(totalBytesIn: sample.bIn,
                            totalBytesOut: sample.bOut, at: now)
